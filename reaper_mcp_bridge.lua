@@ -528,6 +528,49 @@ local function CreateAudioItem(track_index, start_pos, end_pos)
     return {ok = true, item_index = item_index}
 end
 
+-- Insert audio file onto a specific track at a given position
+local function InsertAudioFile(track_index, file_path, position)
+    local track = reaper.GetTrack(0, track_index)
+    if not track then
+        return {ok = false, error = "Track not found at index " .. tostring(track_index)}
+    end
+
+    local source = reaper.PCM_Source_CreateFromFile(file_path)
+    if not source then
+        return {ok = false, error = "Failed to create source from file: " .. tostring(file_path)}
+    end
+
+    local item = reaper.AddMediaItemToTrack(track)
+    if not item then
+        return {ok = false, error = "Failed to create media item"}
+    end
+
+    local take = reaper.AddTakeToMediaItem(item)
+    if not take then
+        return {ok = false, error = "Failed to create take"}
+    end
+
+    reaper.SetMediaItemTake_Source(take, source)
+    reaper.SetMediaItemTakeInfo_Value(take, "D_STARTOFFS", 0)
+
+    local length = reaper.GetMediaSourceLength(source)
+    reaper.SetMediaItemInfo_Value(item, "D_POSITION", position or 0)
+    reaper.SetMediaItemInfo_Value(item, "D_LENGTH", length)
+
+    reaper.UpdateArrange()
+    reaper.UpdateItemInProject(item)
+
+    local item_index = -1
+    for i = 0, reaper.CountTrackMediaItems(track) - 1 do
+        if reaper.GetTrackMediaItem(track, i) == item then
+            item_index = i
+            break
+        end
+    end
+
+    return {ok = true, item_index = item_index, length = length}
+end
+
 -- Set item loop source
 local function SetItemLoopSource(track_index, item_index, loop_source)
     local track = reaper.GetTrack(0, track_index)
@@ -830,6 +873,7 @@ DSL_FUNCTIONS = {
     GetTrackItems = GetTrackItems,
     CreateMIDIItem = CreateMIDIItem,
     CreateAudioItem = CreateAudioItem,
+    InsertAudioFile = InsertAudioFile,
     SetItemLoopSource = SetItemLoopSource,
     InsertMIDINote = InsertMIDINote,
     QuantizeItem = QuantizeItem,

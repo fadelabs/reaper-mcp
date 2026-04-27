@@ -13,7 +13,7 @@ Version: 1.1.0
 """
 
 __version__ = "1.1.0"
-__name__ = "twelvetake-reaper-mcp"
+__package_name__ = "twelvetake-reaper-mcp"
 
 import os
 import asyncio
@@ -930,7 +930,7 @@ async def create_midi_item(track_index: int, position: float, length: float) -> 
     Returns:
         Object with item info.
     """
-    return await reaper_call("CreateNewMIDIItemInProj", track_index, position, position + length, False)
+    return await reaper_call("CreateMIDIItem", track_index, position, position + length)
 
 
 @mcp.tool()
@@ -1095,7 +1095,7 @@ async def insert_audio_file(track_index: int, file_path: str, position: float) -
     Returns:
         Object with item info.
     """
-    return await reaper_call("InsertMedia", file_path, 0, track_index, position)
+    return await reaper_call("InsertAudioFile", track_index, file_path, position)
 
 
 @mcp.tool()
