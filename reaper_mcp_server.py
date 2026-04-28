@@ -2688,6 +2688,112 @@ async def setup_sidechain_with_filter(
     }
 
 
+@mcp.tool()
+async def set_fx_preset_batch(track_indices: list[int], fx_index: int, preset_name: str) -> dict:
+    """Apply the same FX preset to a plugin at the same FX index across multiple tracks.
+
+    Args:
+        track_indices: List of track indices (0-based).
+        fx_index: FX index (0-based) in each track's FX chain.
+        preset_name: Preset name to apply.
+
+    Returns:
+        Object with per-track results and any failures.
+    """
+    if not track_indices:
+        return {"ok": True, "applied": 0, "count": 0}
+
+    applied = []
+    failures = []
+
+    for track_idx in track_indices:
+        result = await reaper_call("TrackFX_SetPreset", track_idx, fx_index, preset_name)
+        if result.get("ok") and result.get("ret"):
+            applied.append(track_idx)
+        else:
+            failures.append({"track": track_idx, "error": result.get("error", "preset not found")})
+
+    result = {
+        "ok": len(failures) == 0,
+        "applied": applied,
+        "count": len(applied),
+        "preset_name": preset_name,
+        "fx_index": fx_index,
+    }
+    if failures:
+        result["failures"] = failures
+        result["error"] = f"Failed on {len(failures)} of {len(track_indices)} tracks"
+    return result
+
+
+_PAN_POSITIONS = {
+    "hard left": -1.0,
+    "left": -0.75,
+    "quarter left": -0.5,
+    "slight left": -0.25,
+    "center": 0.0,
+    "slight right": 0.25,
+    "quarter right": 0.5,
+    "right": 0.75,
+    "hard right": 1.0,
+}
+
+
+@mcp.tool()
+async def add_pan_automation(track_index: int, points: list) -> dict:
+    """Add pan automation points using named positions or numeric values.
+
+    Args:
+        track_index: Track index (0-based).
+        points: List of pan point dicts, each with:
+            - time (float): Time in seconds
+            - position (str or float): Named position ("center", "hard left",
+              "left", "quarter left", "slight left", "slight right",
+              "quarter right", "right", "hard right") or numeric -1.0 to 1.0
+            - shape (int, optional): 0=linear, 1=square, 2=slow, 3=fast start,
+              4=fast end, 5=bezier. Default 0.
+
+    Returns:
+        Object with count of points added and any failures.
+    """
+    if not points:
+        return {"ok": True, "added": 0, "count": 0}
+
+    added = 0
+    failures = []
+
+    for pt in points:
+        time_val = pt.get("time", 0.0)
+        pos = pt.get("position", "center")
+        shape = pt.get("shape", 0)
+
+        if isinstance(pos, str):
+            pan_val = _PAN_POSITIONS.get(pos.lower())
+            if pan_val is None:
+                failures.append({"time": time_val, "position": pos, "error": f"unknown position '{pos}'"})
+                continue
+        else:
+            pan_val = max(-1.0, min(1.0, float(pos)))
+
+        # Pan envelope: value 0.0 = hard left, 0.5 = center, 1.0 = hard right
+        env_val = (pan_val + 1.0) / 2.0
+
+        result = await reaper_call(
+            "InsertEnvelopePoint", track_index, "Pan",
+            time_val, env_val, shape, 0, False, False
+        )
+        if result.get("ok"):
+            added += 1
+        else:
+            failures.append({"time": time_val, "position": pos, "error": result.get("error", "insert failed")})
+
+    result = {"ok": len(failures) == 0, "added": added, "count": len(points)}
+    if failures:
+        result["failures"] = failures
+        result["error"] = f"{len(failures)} point(s) failed"
+    return result
+
+
 # --- MAIN ---
 
 def main():

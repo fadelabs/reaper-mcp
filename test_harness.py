@@ -1253,6 +1253,54 @@ def test_get_all_fx_param_names(b: ReaperBridge, fix: CompoundFixture) -> TestRe
     return TestResult("get_all_fx_param_names", "FAIL" if fails else "PASS", brief(r), fails, r)
 
 
+def test_set_fx_preset_batch(b: ReaperBridge, fix: CompoundFixture) -> TestResult:
+    # Test that SetPreset call works on track_a's existing ReaEQ
+    # First get current preset to verify the call returns data
+    current = b.call("TrackFX_GetPreset", fix.track_a, fix.eq_idx, "")
+    fails = expect_ok(current)
+    if fails:
+        return TestResult("set_fx_preset_batch", "FAIL", brief(current), fails, current)
+
+    # Set a known factory preset on track_a
+    r = b.call("TrackFX_SetPreset", fix.track_a, fix.eq_idx, "- Default -")
+    # SetPreset returns ok:true even if preset name doesn't match exactly,
+    # ret:true means it applied, ret:false means name not found
+    fails = expect_ok(r)
+    return TestResult("set_fx_preset_batch", "FAIL" if fails else "PASS",
+                      f"SetPreset call ok, ret={r.get('ret')}", fails, r)
+
+
+def test_add_pan_automation(b: ReaperBridge, fix: CompoundFixture) -> TestResult:
+    # Show pan envelope on track_a
+    b.call("Main_OnCommand", 40297, 0)  # unselect all
+    b.call("SetTrackSelected", fix.track_a, True)
+    b.call("Main_OnCommand", 40407, 0)  # show pan envelope
+    time.sleep(0.1)
+
+    # Add points using envelope values directly (0=left, 0.5=center, 1=right)
+    r1 = b.call("InsertEnvelopePoint", fix.track_a, "Pan", 1.0, 0.0, 0, 0, False, False)
+    r2 = b.call("InsertEnvelopePoint", fix.track_a, "Pan", 2.0, 0.5, 0, 0, False, False)
+    r3 = b.call("InsertEnvelopePoint", fix.track_a, "Pan", 3.0, 1.0, 0, 0, False, False)
+
+    fails = []
+    if not r1.get("ok"):
+        fails.append(f"point 1 failed: {r1.get('error')}")
+    if not r2.get("ok"):
+        fails.append(f"point 2 failed: {r2.get('error')}")
+    if not r3.get("ok"):
+        fails.append(f"point 3 failed: {r3.get('error')}")
+
+    # Verify points exist
+    pts = b.call("GetEnvelopePoints", fix.track_a, "Pan")
+    point_count = len(pts.get("points", []))
+    if point_count < 3:
+        fails.append(f"expected >=3 pan points, got {point_count}")
+
+    b.call("ClearEnvelope", fix.track_a, "Pan")
+    return TestResult("add_pan_automation", "FAIL" if fails else "PASS",
+                      f"{point_count} pan points", fails)
+
+
 # ===================================================================
 # TEST GROUPS
 # ===================================================================
@@ -1462,6 +1510,8 @@ GROUPS = [
             ("configure_multiband_comp", lambda b, f: test_configure_multiband_comp(b, f)),
             ("sidechain_with_filter", lambda b, f: test_sidechain_with_filter(b, f)),
             ("get_all_fx_param_names", lambda b, f: test_get_all_fx_param_names(b, f)),
+            ("set_fx_preset_batch", lambda b, f: test_set_fx_preset_batch(b, f)),
+            ("add_pan_automation", lambda b, f: test_add_pan_automation(b, f)),
         ],
     },
 ]
