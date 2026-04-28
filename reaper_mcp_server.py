@@ -233,7 +233,7 @@ async def insert_track(index: int = None, name: str = None) -> dict:
 
     # Set name if provided
     if name and result.get("ok"):
-        await reaper_call("GetSetMediaTrackInfo_String", 0, index, "P_NAME", name, True)
+        await reaper_call("GetSetMediaTrackInfo_String", index, "P_NAME", name, True)
 
     return result
 

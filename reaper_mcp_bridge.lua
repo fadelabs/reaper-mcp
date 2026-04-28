@@ -721,17 +721,11 @@ local function SetTempo(bpm)
 end
 
 local function GetTimeSignature()
-    -- GetProjectTimeSignature2 returns: bpm (tempo), bpi (beats per measure = numerator)
     local bpm, bpi = reaper.GetProjectTimeSignature2(0)
-    -- TimeMap_GetTimeSigAtTime at position 0 gives us the time signature
-    -- Returns: retval, timesig_num, timesig_denom, tempo
-    -- But Lua binding may differ - let's capture all and find correct values
-    local r1, r2, r3, r4 = reaper.TimeMap_GetTimeSigAtTime(0, 0)
-    -- Based on testing: r1=num(4), r2=tempo(92), so denominator not directly available
-    -- For standard time signatures, denominator is typically 4 (quarter note)
-    -- Use TimeMap2_timeToBeats to get more accurate info if needed
-    local numerator = bpi  -- beats per measure
-    local denominator = 4  -- assume quarter note (most common)
+    -- TimeMap2_timeToBeats returns: full beats, measures, cml, fullbeats, cdenom
+    local retval, measures, cml, fullbeats, cdenom = reaper.TimeMap2_timeToBeats(0, 0)
+    local numerator = bpi
+    local denominator = cdenom or 4
     return {ok = true, numerator = numerator, denominator = denominator, tempo = bpm}
 end
 
@@ -840,7 +834,7 @@ local function GetProjectSummary()
         project_name = project_name,
         project_path = project_path,
         tempo = bpm,
-        time_signature = {numerator = bpi, denominator = 4},
+        time_signature = {numerator = bpi, denominator = ({reaper.TimeMap2_timeToBeats(0, 0)})[5] or 4},
         project_length = project_length,
         track_count = track_count,
         tracks = tracks,
@@ -848,6 +842,384 @@ local function GetProjectSummary()
         markers = markers,
         regions = regions
     }
+end
+
+-- ---------------------------------------------------------------------------
+-- Envelope automation functions
+-- ---------------------------------------------------------------------------
+
+local function GetEnvelopeByName(track_index, envelope_name)
+    local track
+    if track_index == -1 then
+        track = reaper.GetMasterTrack(0)
+    else
+        track = reaper.GetTrack(0, track_index)
+    end
+    if not track then return nil end
+    local count = reaper.CountTrackEnvelopes(track)
+    for i = 0, count - 1 do
+        local env = reaper.GetTrackEnvelope(track, i)
+        local retval, name = reaper.GetEnvelopeName(env)
+        if retval and name == envelope_name then
+            return env
+        end
+    end
+    -- Envelope not visible yet — try to show it
+    if envelope_name == "Volume" then
+        local env = reaper.GetTrackEnvelopeByName(track, "Volume")
+        if env then return env end
+    elseif envelope_name == "Pan" then
+        local env = reaper.GetTrackEnvelopeByName(track, "Pan")
+        if env then return env end
+    end
+    return nil
+end
+
+local function InsertEnvelopePoint(track_index, envelope_name, time, value, shape, tension, selected, no_sort)
+    local env = GetEnvelopeByName(track_index, envelope_name)
+    if not env then
+        return {ok = false, error = "Envelope '" .. tostring(envelope_name) .. "' not found on track " .. tostring(track_index)}
+    end
+    local result = reaper.InsertEnvelopePoint(env, time, value, shape or 0, tension or 0, selected or false, no_sort or false)
+    if result then
+        reaper.Envelope_SortPoints(env)
+        local count = reaper.CountEnvelopePoints(env)
+        return {ok = true, point_index = count - 1}
+    end
+    return {ok = false, error = "Failed to insert envelope point"}
+end
+
+local function GetEnvelopePoints(track_index, envelope_name)
+    local env = GetEnvelopeByName(track_index, envelope_name)
+    if not env then
+        return {ok = false, error = "Envelope '" .. tostring(envelope_name) .. "' not found"}
+    end
+    local count = reaper.CountEnvelopePoints(env)
+    local points = {}
+    for i = 0, count - 1 do
+        local retval, time, value, shape, tension, selected = reaper.GetEnvelopePoint(env, i)
+        if retval then
+            table.insert(points, {index = i, time = time, value = value, shape = shape})
+        end
+    end
+    return {ok = true, points = points, count = count}
+end
+
+local function CountEnvelopePoints(track_index, envelope_name)
+    local env = GetEnvelopeByName(track_index, envelope_name)
+    if not env then
+        return {ok = false, error = "Envelope not found"}
+    end
+    return {ok = true, count = reaper.CountEnvelopePoints(env)}
+end
+
+local function DeleteEnvelopePoint(track_index, envelope_name, point_index)
+    local env = GetEnvelopeByName(track_index, envelope_name)
+    if not env then
+        return {ok = false, error = "Envelope not found"}
+    end
+    local result = reaper.DeleteEnvelopePointRange(env, point_index, point_index + 1)
+    return {ok = true}
+end
+
+local function ClearEnvelope(track_index, envelope_name)
+    local env = GetEnvelopeByName(track_index, envelope_name)
+    if not env then
+        return {ok = false, error = "Envelope not found"}
+    end
+    local count = reaper.CountEnvelopePoints(env)
+    if count > 0 then
+        local retval, time_start = reaper.GetEnvelopePoint(env, 0)
+        local retval2, time_end = reaper.GetEnvelopePoint(env, count - 1)
+        reaper.DeleteEnvelopePointRange(env, time_start - 1, time_end + 1)
+    end
+    return {ok = true}
+end
+
+local function SetEnvelopeArm(track_index, envelope_name, arm)
+    local env = GetEnvelopeByName(track_index, envelope_name)
+    if not env then
+        return {ok = false, error = "Envelope not found"}
+    end
+    local br = reaper.BR_EnvAlloc(env, false)
+    if br then
+        local active, visible, armed, inLane, laneHeight, defaultShape, minValue, maxValue, centerValue, envType, faderScaling, automationItemIdx = reaper.BR_EnvGetProperties(br)
+        reaper.BR_EnvSetProperties(br, active, visible, arm, inLane, laneHeight, defaultShape, faderScaling)
+        reaper.BR_EnvFree(br, true)
+        return {ok = true}
+    end
+    return {ok = false, error = "Could not access envelope properties (SWS extension may be required)"}
+end
+
+-- ---------------------------------------------------------------------------
+-- Item query functions
+-- ---------------------------------------------------------------------------
+
+local function GetItemInfo(track_index, item_index)
+    local track = reaper.GetTrack(0, track_index)
+    if not track then
+        return {ok = false, error = "Track not found"}
+    end
+    local item = reaper.GetTrackMediaItem(track, item_index)
+    if not item then
+        return {ok = false, error = "Item not found"}
+    end
+    local position = reaper.GetMediaItemInfo_Value(item, "D_POSITION")
+    local length = reaper.GetMediaItemInfo_Value(item, "D_LENGTH")
+    local volume = reaper.GetMediaItemInfo_Value(item, "D_VOL")
+    local mute = reaper.GetMediaItemInfo_Value(item, "B_MUTE") == 1
+    local fade_in = reaper.GetMediaItemInfo_Value(item, "D_FADEINLEN")
+    local fade_out = reaper.GetMediaItemInfo_Value(item, "D_FADEOUTLEN")
+
+    local take_count = reaper.CountTakes(item)
+    local take_info = nil
+    if take_count > 0 then
+        local take = reaper.GetActiveTake(item)
+        if take then
+            local retval, take_name = reaper.GetSetMediaItemTakeInfo_String(take, "P_NAME", "", false)
+            local source = reaper.GetMediaItemTake_Source(take)
+            local source_file = ""
+            if source then
+                source_file = reaper.GetMediaSourceFileName(source)
+            end
+            take_info = {
+                name = take_name,
+                source_file = source_file,
+                is_midi = reaper.TakeIsMIDI(take)
+            }
+        end
+    end
+
+    return {
+        ok = true,
+        position = position,
+        length = length,
+        volume = volume,
+        mute = mute,
+        fade_in = fade_in,
+        fade_out = fade_out,
+        take_count = take_count,
+        take = take_info
+    }
+end
+
+-- ---------------------------------------------------------------------------
+-- MIDI note functions
+-- ---------------------------------------------------------------------------
+
+local function MIDI_InsertNote(track_index, item_index, selected, muted, start_ppq, end_ppq, channel, pitch, velocity, no_sort)
+    local track = reaper.GetTrack(0, track_index)
+    if not track then
+        return {ok = false, error = "Track not found"}
+    end
+    local item = reaper.GetTrackMediaItem(track, item_index)
+    if not item then
+        return {ok = false, error = "Item not found"}
+    end
+    local take = reaper.GetActiveTake(item)
+    if not take or not reaper.TakeIsMIDI(take) then
+        return {ok = false, error = "Item is not a MIDI item"}
+    end
+    local result = reaper.MIDI_InsertNote(take, selected or false, muted or false, start_ppq, end_ppq, channel or 0, pitch, velocity, no_sort or false)
+    if result then
+        reaper.MIDI_Sort(take)
+        local note_count = ({reaper.MIDI_CountEvts(take)})[2]
+        return {ok = true, note_index = note_count - 1}
+    end
+    return {ok = false, error = "Failed to insert MIDI note"}
+end
+
+local function GetMIDINotes(track_index, item_index)
+    local track = reaper.GetTrack(0, track_index)
+    if not track then
+        return {ok = false, error = "Track not found"}
+    end
+    local item = reaper.GetTrackMediaItem(track, item_index)
+    if not item then
+        return {ok = false, error = "Item not found"}
+    end
+    local take = reaper.GetActiveTake(item)
+    if not take or not reaper.TakeIsMIDI(take) then
+        return {ok = false, error = "Item is not a MIDI item"}
+    end
+    local retval, note_count = reaper.MIDI_CountEvts(take)
+    local notes = {}
+    for i = 0, note_count - 1 do
+        local retval, selected, muted, start_ppq, end_ppq, channel, pitch, velocity = reaper.MIDI_GetNote(take, i)
+        if retval then
+            table.insert(notes, {
+                index = i,
+                pitch = pitch,
+                velocity = velocity,
+                start_ppq = start_ppq,
+                end_ppq = end_ppq,
+                channel = channel,
+                selected = selected,
+                muted = muted
+            })
+        end
+    end
+    return {ok = true, notes = notes, count = note_count}
+end
+
+local function MIDI_DeleteNote(track_index, item_index, note_index)
+    local track = reaper.GetTrack(0, track_index)
+    if not track then
+        return {ok = false, error = "Track not found"}
+    end
+    local item = reaper.GetTrackMediaItem(track, item_index)
+    if not item then
+        return {ok = false, error = "Item not found"}
+    end
+    local take = reaper.GetActiveTake(item)
+    if not take or not reaper.TakeIsMIDI(take) then
+        return {ok = false, error = "Item is not a MIDI item"}
+    end
+    local result = reaper.MIDI_DeleteNote(take, note_index)
+    if result then
+        reaper.MIDI_Sort(take)
+        return {ok = true}
+    end
+    return {ok = false, error = "Failed to delete MIDI note"}
+end
+
+local function ClearMIDIItem(track_index, item_index)
+    local track = reaper.GetTrack(0, track_index)
+    if not track then
+        return {ok = false, error = "Track not found"}
+    end
+    local item = reaper.GetTrackMediaItem(track, item_index)
+    if not item then
+        return {ok = false, error = "Item not found"}
+    end
+    local take = reaper.GetActiveTake(item)
+    if not take or not reaper.TakeIsMIDI(take) then
+        return {ok = false, error = "Item is not a MIDI item"}
+    end
+    local retval, note_count = reaper.MIDI_CountEvts(take)
+    for i = note_count - 1, 0, -1 do
+        reaper.MIDI_DeleteNote(take, i)
+    end
+    reaper.MIDI_Sort(take)
+    return {ok = true, deleted = note_count}
+end
+
+-- ---------------------------------------------------------------------------
+-- Render functions
+-- ---------------------------------------------------------------------------
+
+local function RenderProject(output_path, start_time, end_time, tail_seconds)
+    -- Set render bounds
+    if start_time and end_time then
+        reaper.GetSet_LoopTimeRange(true, false, start_time, end_time, false)
+        reaper.SetMediaTrackInfo_Value(reaper.GetMasterTrack(0), "I_AUTOMODE", 1)
+    end
+
+    -- Set render file
+    local retval, project_path = reaper.EnumProjects(-1, "")
+    if output_path then
+        local dir = output_path:match("(.+)[/\\]")
+        local file = output_path:match("([^/\\]+)$")
+        if dir and file then
+            reaper.GetSetProjectInfo_String(0, "RENDER_FILE", dir, true)
+            reaper.GetSetProjectInfo_String(0, "RENDER_PATTERN", file:gsub("%.wav$", ""):gsub("%.mp3$", ""):gsub("%.flac$", ""), true)
+        end
+    end
+
+    -- Set render tail
+    if tail_seconds and tail_seconds > 0 then
+        reaper.GetSetProjectInfo(0, "RENDER_TAILMS", tail_seconds * 1000, true)
+    end
+
+    -- Execute render
+    reaper.Main_OnCommand(41824, 0)  -- File: Render project, using the most recent render settings
+
+    return {ok = true, output_path = output_path}
+end
+
+local function RenderRegion(region_index, output_path)
+    -- Find the region
+    local ret, num_markers, num_regions = reaper.CountProjectMarkers(0)
+    local found = false
+    local rgn_start, rgn_end
+    for i = 0, num_markers + num_regions - 1 do
+        local retval, isrgn, pos, rgnend, name, markrgnindexnumber = reaper.EnumProjectMarkers(i)
+        if retval and isrgn and markrgnindexnumber == region_index then
+            rgn_start = pos
+            rgn_end = rgnend
+            found = true
+            break
+        end
+    end
+    if not found then
+        return {ok = false, error = "Region " .. tostring(region_index) .. " not found"}
+    end
+
+    return RenderProject(output_path, rgn_start, rgn_end, 0)
+end
+
+local function GetProjectLength()
+    return {ok = true, length = reaper.GetProjectLength(0)}
+end
+
+-- ---------------------------------------------------------------------------
+-- Transport functions
+-- ---------------------------------------------------------------------------
+
+local function GetPlayPosition()
+    return {ok = true, position = reaper.GetPlayPosition()}
+end
+
+local function Pause()
+    reaper.Main_OnCommand(1008, 0)  -- Transport: Pause
+    return {ok = true}
+end
+
+local function Record()
+    reaper.Main_OnCommand(1013, 0)  -- Transport: Record
+    return {ok = true}
+end
+
+local function GetRepeatState()
+    local state = reaper.GetSetRepeat(-1)
+    return {ok = true, repeat_state = state == 1}
+end
+
+-- ---------------------------------------------------------------------------
+-- Marker/Region functions
+-- ---------------------------------------------------------------------------
+
+local function GetProjectMarkers()
+    local markers = {}
+    local ret, num_markers, num_regions = reaper.CountProjectMarkers(0)
+    for i = 0, num_markers + num_regions - 1 do
+        local retval, isrgn, pos, rgnend, name, markrgnindexnumber = reaper.EnumProjectMarkers(i)
+        if retval and not isrgn then
+            table.insert(markers, {
+                index = markrgnindexnumber,
+                position = pos,
+                name = name
+            })
+        end
+    end
+    return {ok = true, markers = markers}
+end
+
+local function GetProjectRegions()
+    local regions = {}
+    local ret, num_markers, num_regions = reaper.CountProjectMarkers(0)
+    for i = 0, num_markers + num_regions - 1 do
+        local retval, isrgn, pos, rgnend, name, markrgnindexnumber = reaper.EnumProjectMarkers(i)
+        if retval and isrgn then
+            table.insert(regions, {
+                index = markrgnindexnumber,
+                start = pos,
+                ["end"] = rgnend,
+                name = name
+            })
+        end
+    end
+    return {ok = true, regions = regions}
 end
 
 -- Export function table for DSL
@@ -892,6 +1264,36 @@ DSL_FUNCTIONS = {
     GetTempo = GetTempo,
     SetTempo = SetTempo,
     GetTimeSignature = GetTimeSignature,
+    GetPlayPosition = GetPlayPosition,
+    Pause = Pause,
+    Record = Record,
+    GetRepeatState = GetRepeatState,
+
+    -- Envelope automation
+    InsertEnvelopePoint = InsertEnvelopePoint,
+    GetEnvelopePoints = GetEnvelopePoints,
+    CountEnvelopePoints = CountEnvelopePoints,
+    DeleteEnvelopePoint = DeleteEnvelopePoint,
+    ClearEnvelope = ClearEnvelope,
+    SetEnvelopeArm = SetEnvelopeArm,
+
+    -- Item queries
+    GetItemInfo = GetItemInfo,
+
+    -- MIDI notes
+    MIDI_InsertNote = MIDI_InsertNote,
+    GetMIDINotes = GetMIDINotes,
+    MIDI_DeleteNote = MIDI_DeleteNote,
+    ClearMIDIItem = ClearMIDIItem,
+
+    -- Render
+    RenderProject = RenderProject,
+    RenderRegion = RenderRegion,
+    GetProjectLength = GetProjectLength,
+
+    -- Markers/Regions
+    GetProjectMarkers = GetProjectMarkers,
+    GetProjectRegions = GetProjectRegions,
 
     -- Project summary
     GetProjectSummary = GetProjectSummary
