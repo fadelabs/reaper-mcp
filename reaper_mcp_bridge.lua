@@ -24,7 +24,7 @@ local function encode_json(v)
         return string.format('"%s"', v:gsub('\\', '\\\\'):gsub('"', '\\"'):gsub('\n', '\\n'):gsub('\r', '\\r'))
     elseif type(v) == "table" then
         local parts = {}
-        local is_array = #v > 0
+        local is_array = v.__is_array or #v > 0
         if is_array then
             for i, item in ipairs(v) do
                 table.insert(parts, encode_json(item))
@@ -32,7 +32,9 @@ local function encode_json(v)
             return "[" .. table.concat(parts, ",") .. "]"
         else
             for k, item in pairs(v) do
-                table.insert(parts, string.format('"%s":%s', k, encode_json(item)))
+                if k ~= "__is_array" then
+                    table.insert(parts, string.format('"%s":%s', k, encode_json(item)))
+                end
             end
             return "{" .. table.concat(parts, ",") .. "}"
         end
@@ -237,7 +239,7 @@ local function GetTrackInfo(track_index)
     end
     
     -- Get FX names
-    local fx_names = {}
+    local fx_names = {__is_array = true}
     local fx_count = reaper.TrackFX_GetCount(track)
     for i = 0, fx_count - 1 do
         local retval, fx_name = reaper.TrackFX_GetFXName(track, i, "")
@@ -298,7 +300,7 @@ end
 
 -- Get all tracks with detailed info
 local function GetAllTracksInfo()
-    local tracks = {}
+    local tracks = {__is_array = true}
     local count = reaper.CountTracks(0)
     
     for i = 0, count - 1 do
@@ -406,7 +408,7 @@ end
 
 -- Get selected items
 local function GetSelectedItems()
-    local items = {}
+    local items = {__is_array = true}
     local count = reaper.CountSelectedMediaItems(0)
     
     for i = 0, count - 1 do
@@ -443,7 +445,7 @@ end
 
 -- Get all items
 local function GetAllItems()
-    local items = {}
+    local items = {__is_array = true}
     local track_count = reaper.CountTracks(0)
     
     for t = 0, track_count - 1 do
@@ -478,8 +480,8 @@ local function GetTrackItems(track_index)
     if not track then
         return {ok = false, error = "Track not found"}
     end
-    
-    local items = {}
+
+    local items = {__is_array = true}
     local item_count = reaper.CountTrackMediaItems(track)
     
     for i = 0, item_count - 1 do
@@ -782,7 +784,7 @@ local function GetProjectSummary()
     local track_count = reaper.CountTracks(0)
 
     -- Get all tracks info
-    local tracks = {}
+    local tracks = {__is_array = true}
     for i = 0, track_count - 1 do
         local track = reaper.GetTrack(0, i)
         if track then
@@ -794,7 +796,7 @@ local function GetProjectSummary()
 
             -- Get FX info
             local fx_count = reaper.TrackFX_GetCount(track)
-            local fx_names = {}
+            local fx_names = {__is_array = true}
             for j = 0, fx_count - 1 do
                 local retval, fx_name = reaper.TrackFX_GetFXName(track, j, "")
                 if retval then
@@ -819,7 +821,7 @@ local function GetProjectSummary()
     local master = reaper.GetMasterTrack(0)
     local master_vol = reaper.GetMediaTrackInfo_Value(master, "D_VOL")
     local master_fx_count = reaper.TrackFX_GetCount(master)
-    local master_fx_names = {}
+    local master_fx_names = {__is_array = true}
     for j = 0, master_fx_count - 1 do
         local retval, fx_name = reaper.TrackFX_GetFXName(master, j, "")
         if retval then
@@ -834,8 +836,8 @@ local function GetProjectSummary()
     }
 
     -- Get markers and regions
-    local markers = {}
-    local regions = {}
+    local markers = {__is_array = true}
+    local regions = {__is_array = true}
     local ret, num_markers, num_regions = reaper.CountProjectMarkers(0)
     for i = 0, num_markers + num_regions - 1 do
         local retval, isrgn, pos, rgnend, name, markrgnindexnumber = reaper.EnumProjectMarkers(i)
@@ -923,7 +925,7 @@ local function GetEnvelopePoints(track_index, envelope_name)
         return {ok = false, error = "Envelope '" .. tostring(envelope_name) .. "' not found"}
     end
     local count = reaper.CountEnvelopePoints(env)
-    local points = {}
+    local points = {__is_array = true}
     for i = 0, count - 1 do
         local retval, time, value, shape, tension, selected = reaper.GetEnvelopePoint(env, i)
         if retval then
@@ -1071,7 +1073,7 @@ local function GetMIDINotes(track_index, item_index)
         return {ok = false, error = "Item is not a MIDI item"}
     end
     local retval, note_count = reaper.MIDI_CountEvts(take)
-    local notes = {}
+    local notes = {__is_array = true}
     for i = 0, note_count - 1 do
         local retval, selected, muted, start_ppq, end_ppq, channel, pitch, velocity = reaper.MIDI_GetNote(take, i)
         if retval then
@@ -1218,7 +1220,7 @@ end
 -- ---------------------------------------------------------------------------
 
 local function GetProjectMarkers()
-    local markers = {}
+    local markers = {__is_array = true}
     local ret, num_markers, num_regions = reaper.CountProjectMarkers(0)
     for i = 0, num_markers + num_regions - 1 do
         local retval, isrgn, pos, rgnend, name, markrgnindexnumber = reaper.EnumProjectMarkers(i)
@@ -1234,7 +1236,7 @@ local function GetProjectMarkers()
 end
 
 local function GetProjectRegions()
-    local regions = {}
+    local regions = {__is_array = true}
     local ret, num_markers, num_regions = reaper.CountProjectMarkers(0)
     for i = 0, num_markers + num_regions - 1 do
         local retval, isrgn, pos, rgnend, name, markrgnindexnumber = reaper.EnumProjectMarkers(i)
@@ -2348,7 +2350,7 @@ local function process_request()
 
                     elseif fname == "GetProjectMarkers" then
                         -- Get all markers (not regions) in the project
-                        local markers = {}
+                        local markers = {__is_array = true}
                         local ret, num_markers, num_regions = reaper.CountProjectMarkers(0)
                         for i = 0, num_markers + num_regions - 1 do
                             local retval, isrgn, pos, rgnend, name, markrgnindexnumber = reaper.EnumProjectMarkers(i)
@@ -2365,7 +2367,7 @@ local function process_request()
 
                     elseif fname == "GetProjectRegions" then
                         -- Get all regions in the project
-                        local regions = {}
+                        local regions = {__is_array = true}
                         local ret, num_markers, num_regions = reaper.CountProjectMarkers(0)
                         for i = 0, num_markers + num_regions - 1 do
                             local retval, isrgn, pos, rgnend, name, markrgnindexnumber = reaper.EnumProjectMarkers(i)
@@ -2979,8 +2981,8 @@ local function process_request()
                         end
                     
                     elseif fname == "TrackFX_GetFXName" then
-                        -- Get FX name
-                        if #args >= 4 then
+                        -- Get FX name (args: track_index, fx_index [, buf_string, buf_size])
+                        if #args >= 2 then
                             local track = nil
                             if type(args[1]) == "number" then
                                 if args[1] == -1 then
@@ -5132,7 +5134,7 @@ local function process_request()
                                     response.error = "No active take"
                                 else
                                     local _, note_count, _, _ = reaper.MIDI_CountEvts(take)
-                                    local notes = {}
+                                    local notes = {__is_array = true}
                                     for i = 0, note_count - 1 do
                                         local retval, sel, muted, start_ppq, end_ppq, chan, pitch, vel = reaper.MIDI_GetNote(take, i)
                                         table.insert(notes, {
@@ -5231,7 +5233,7 @@ local function process_request()
                                 response.error = "Envelope not found: " .. tostring(args[2])
                             else
                                 local count = reaper.CountEnvelopePoints(env)
-                                local points = {}
+                                local points = {__is_array = true}
                                 for i = 0, count - 1 do
                                     local retval, time, value, shape, tension, selected = reaper.GetEnvelopePoint(env, i)
                                     table.insert(points, {
@@ -5334,7 +5336,7 @@ local function process_request()
                             response.ok = false
                             response.error = "Track not found"
                         else
-                            local presets = {}
+                            local presets = {__is_array = true}
                             local retval, num_presets = reaper.TrackFX_GetPresetIndex(track, args[2])
                             for i = 0, num_presets - 1 do
                                 reaper.TrackFX_SetPresetByIndex(track, args[2], i)
