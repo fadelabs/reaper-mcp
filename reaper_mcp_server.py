@@ -35,6 +35,41 @@ def db_to_linear(db: float) -> float:
     return 10 ** (db / 20) if db > -150 else 0
 
 
+import math
+
+_REAEQ_BAND_SIZE = 5
+_REAEQ_TYPE_MAP = {
+    "lpf": 0, "low_pass": 0,
+    "hpf": 1, "high_pass": 1,
+    "band": 2, "peak": 2, "bell": 2,
+    "notch": 3,
+    "allpass": 4,
+    "low_shelf": 5, "lowshelf": 5,
+    "high_shelf": 6, "highshelf": 6,
+}
+
+
+def _freq_to_normalized(freq: float) -> float:
+    """Convert Hz to ReaEQ normalized frequency (0-1, log scale 20Hz-24kHz)."""
+    if freq <= 20:
+        return 0.0
+    if freq >= 24000:
+        return 1.0
+    return math.log(freq / 20.0) / math.log(24000.0 / 20.0)
+
+
+def _gain_to_normalized(gain_db: float) -> float:
+    """Convert dB gain to ReaEQ normalized (0.5 = 0dB, range ±24dB)."""
+    return max(0.0, min(1.0, (gain_db + 24.0) / 48.0))
+
+
+def _q_to_bandwidth(q: float) -> float:
+    """Convert Q factor to ReaEQ bandwidth parameter."""
+    if q <= 0:
+        return 1.0
+    return max(0.0, min(1.0, 0.5 / q))
+
+
 # Configuration
 REAPER_HOST = os.getenv("REAPER_HOST", "localhost")
 REAPER_PORT = int(os.getenv("REAPER_PORT", "9000"))
@@ -2194,6 +2229,463 @@ async def zoom_to_project() -> dict:
         Object with success status.
     """
     return await reaper_call("Main_OnCommand", 40295, 0)  # Zoom to project
+
+
+# --- BATCH & COMPOUND TOOLS ---
+
+
+@mcp.tool()
+async def batch_set_fx_params(track_index: int, fx_index: int, params: list) -> dict:
+    """Set multiple FX parameters in one call.
+
+    Args:
+        track_index: Track index (0-based) or -1 for master track.
+        fx_index: FX index (0-based) in the FX chain.
+        params: List of parameter dicts, each with:
+            - param_index (int): Parameter index (0-based)
+            - value (float): New value for the parameter
+
+    Returns:
+        Object with set_count, total_requested, and any failures.
+    """
+    if not params:
+        return {"ok": True, "set_count": 0, "total_requested": 0, "failures": []}
+    return await reaper_call("BatchSetFXParams", track_index, fx_index, params)
+
+
+@mcp.tool()
+async def copy_fx_chain(source_track: int, dest_track: int) -> dict:
+    """Copy all FX from source track to destination track.
+
+    Args:
+        source_track: Source track index (0-based) or -1 for master.
+        dest_track: Destination track index (0-based) or -1 for master.
+
+    Returns:
+        Object with copied FX count and any failures.
+    """
+    count_result = await reaper_call("TrackFX_GetCount", source_track)
+    if not count_result.get("ok"):
+        return {"ok": False, "error": "Cannot read source track FX", "details": count_result}
+
+    fx_count = int(count_result.get("ret", 0))
+    if fx_count == 0:
+        return {"ok": True, "copied": 0, "note": "Source track has no FX"}
+
+    dest_count_result = await reaper_call("TrackFX_GetCount", dest_track)
+    if not dest_count_result.get("ok"):
+        return {"ok": False, "error": "Cannot read destination track", "details": dest_count_result}
+
+    copied = 0
+    failures = []
+    for i in range(fx_count):
+        dest_idx = int(dest_count_result.get("ret", 0)) + copied
+        result = await reaper_call("TrackFX_CopyToTrack", source_track, i, dest_track, dest_idx, False)
+        if result.get("ok"):
+            copied += 1
+        else:
+            failures.append({"fx_index": i, "error": result.get("error", "copy failed")})
+
+    result = {
+        "ok": len(failures) == 0,
+        "source_track": source_track,
+        "dest_track": dest_track,
+        "copied": copied,
+        "total_source_fx": fx_count,
+    }
+    if failures:
+        result["failures"] = failures
+        result["error"] = f"Failed to copy {len(failures)} of {fx_count} FX"
+    return result
+
+
+@mcp.tool()
+async def batch_create_tracks(tracks: list) -> dict:
+    """Create multiple tracks at once.
+
+    Args:
+        tracks: List of track dicts, each with:
+            - name (str): Track name
+            - color (dict, optional): {r: int, g: int, b: int}
+            - folder_depth (int, optional): 0=normal, 1=folder parent, -1=end of folder
+
+    Returns:
+        Object with list of created track indices.
+    """
+    if not tracks:
+        return {"ok": True, "created": [], "count": 0}
+
+    count_result = await reaper_call("CountTracks", 0)
+    base_index = int(count_result.get("ret", 0))
+
+    created = []
+    failures = []
+
+    for i, track_def in enumerate(tracks):
+        idx = base_index + i
+        result = await reaper_call("InsertTrackAtIndex", idx, True)
+        if not result.get("ok"):
+            failures.append({"index": i, "name": track_def.get("name", ""), "error": "insert failed"})
+            continue
+
+        name = track_def.get("name", f"Track {idx + 1}")
+        await reaper_call("GetSetMediaTrackInfo_String", idx, "P_NAME", name, True)
+
+        color = track_def.get("color")
+        if color and isinstance(color, dict):
+            r, g, b = color.get("r", 0), color.get("g", 0), color.get("b", 0)
+            color_int = (1 << 24) | (b << 16) | (g << 8) | r
+            await reaper_call("SetMediaTrackInfo_Value", idx, "I_CUSTOMCOLOR", color_int)
+
+        folder_depth = track_def.get("folder_depth")
+        if folder_depth is not None:
+            await reaper_call("SetMediaTrackInfo_Value", idx, "I_FOLDERDEPTH", folder_depth)
+
+        created.append({"index": idx, "name": name})
+
+    result = {"ok": len(failures) == 0, "created": created, "count": len(created)}
+    if failures:
+        result["failures"] = failures
+        result["error"] = f"Failed to create {len(failures)} of {len(tracks)} tracks"
+    return result
+
+
+@mcp.tool()
+async def set_fx_params_by_name(track_index: int, fx_index: int, params: dict) -> dict:
+    """Set FX parameters by name instead of index.
+
+    Discovers parameter names, matches against provided names
+    (case-insensitive partial matching), then sets matched parameters.
+
+    Args:
+        track_index: Track index (0-based) or -1 for master track.
+        fx_index: FX index (0-based) in the FX chain.
+        params: Dict mapping parameter names to values.
+            Example: {"Threshold": 0.3, "Ratio": 0.5, "Attack": 0.2}
+
+    Returns:
+        Object with matched parameters and any unmatched names.
+    """
+    if not params:
+        return {"ok": True, "set_count": 0, "total_requested": 0, "matched": {}}
+
+    names_result = await reaper_call("GetAllFXParamNames", track_index, fx_index)
+    if not names_result.get("ok"):
+        return {"ok": False, "error": "Cannot read FX parameters", "details": names_result}
+
+    param_name_map = {}
+    for p in names_result.get("params", []):
+        param_name_map[p["name"].lower()] = p["index"]
+
+    matched = {}
+    unmatched = []
+    batch_params = []
+
+    for req_name, value in params.items():
+        req_lower = req_name.lower()
+        if req_lower in param_name_map:
+            idx = param_name_map[req_lower]
+            batch_params.append({"param_index": idx, "value": value})
+            matched[req_name] = {"param_index": idx, "value": value}
+        else:
+            candidates = [(k, v) for k, v in param_name_map.items() if req_lower in k]
+            if len(candidates) == 1:
+                pname, idx = candidates[0]
+                batch_params.append({"param_index": idx, "value": value})
+                matched[req_name] = {"param_index": idx, "value": value, "matched_name": pname}
+            elif len(candidates) > 1:
+                unmatched.append({"name": req_name, "error": "ambiguous", "candidates": [k for k, _ in candidates]})
+            else:
+                unmatched.append({"name": req_name, "error": "not found"})
+
+    if batch_params:
+        set_result = await reaper_call("BatchSetFXParams", track_index, fx_index, batch_params)
+    else:
+        set_result = {"ok": True, "set_count": 0}
+
+    result = {
+        "ok": set_result.get("ok", False) and len(unmatched) == 0,
+        "set_count": set_result.get("set_count", 0),
+        "total_requested": len(params),
+        "matched": matched,
+    }
+    if unmatched:
+        result["unmatched"] = unmatched
+        result["error"] = f"{len(unmatched)} parameter(s) could not be matched"
+    return result
+
+
+@mcp.tool()
+async def create_submix(
+    name: str,
+    source_tracks: list[int],
+    add_eq: bool = False,
+    add_comp: bool = False
+) -> dict:
+    """Create a submix bus with optional EQ and compression, routing source tracks to it.
+
+    Args:
+        name: Name for the submix bus track.
+        source_tracks: List of track indices to route to this bus.
+        add_eq: If True, add ReaEQ to the bus.
+        add_comp: If True, add ReaComp to the bus.
+
+    Returns:
+        Object with bus_track_index, routing info, and FX indices.
+    """
+    count_result = await reaper_call("CountTracks", 0)
+    bus_index = int(count_result.get("ret", 0))
+
+    await reaper_call("InsertTrackAtIndex", bus_index, True)
+    await reaper_call("GetSetMediaTrackInfo_String", bus_index, "P_NAME", name, True)
+
+    sends_created = []
+    send_failures = []
+    for src_idx in source_tracks:
+        send_result = await reaper_call("CreateTrackSend", src_idx, bus_index)
+        if send_result.get("ok"):
+            sends_created.append({"source_track": src_idx, "send_index": send_result.get("ret")})
+        else:
+            send_failures.append(src_idx)
+
+    fx_added = {}
+    fx_failures = []
+
+    if add_eq:
+        eq_result = await reaper_call("TrackFX_AddByName", bus_index, "ReaEQ", False, -1)
+        if eq_result.get("ret", -1) >= 0:
+            fx_added["eq_fx_index"] = eq_result.get("ret")
+        else:
+            fx_failures.append("ReaEQ")
+
+    if add_comp:
+        comp_result = await reaper_call("TrackFX_AddByName", bus_index, "ReaComp", False, -1)
+        if comp_result.get("ret", -1) >= 0:
+            fx_added["comp_fx_index"] = comp_result.get("ret")
+        else:
+            fx_failures.append("ReaComp")
+
+    result = {
+        "ok": len(send_failures) == 0 and len(fx_failures) == 0,
+        "bus_track_index": bus_index,
+        "bus_name": name,
+        "sends": sends_created,
+        **fx_added,
+        "note": f"Created submix '{name}' with {len(sends_created)} sends.",
+    }
+    if send_failures:
+        result["send_failures"] = send_failures
+        result["error"] = f"Failed sends from tracks: {send_failures}"
+    if fx_failures:
+        err = result.get("error", "")
+        result["error"] = (err + "; " if err else "") + f"Failed to add FX: {', '.join(fx_failures)}"
+    return result
+
+
+@mcp.tool()
+async def batch_apply_eq(track_indices: list[int], bands: list) -> dict:
+    """Apply identical EQ settings to multiple tracks.
+
+    Adds ReaEQ to each track and configures it with the given bands.
+
+    Args:
+        track_indices: List of track indices (0-based) to apply EQ to.
+        bands: List of EQ band dicts, each with:
+            - frequency (float): Center/corner frequency in Hz
+            - gain (float): Gain in dB (0 for HPF/LPF)
+            - q (float): Q factor (bandwidth)
+            - type (str): "bell", "low_shelf", "high_shelf", "hpf", "lpf", "notch"
+
+    Returns:
+        Object with per-track results.
+    """
+    if not track_indices:
+        return {"ok": True, "results": [], "count": 0}
+    if not bands:
+        return {"ok": False, "error": "No EQ bands specified"}
+
+    params = []
+    for band_num, band in enumerate(bands):
+        base = band_num * _REAEQ_BAND_SIZE
+        band_type = _REAEQ_TYPE_MAP.get(band.get("type", "bell").lower(), 2)
+        freq_norm = _freq_to_normalized(band.get("frequency", 1000.0))
+        gain_norm = _gain_to_normalized(band.get("gain", 0.0))
+        bw_norm = _q_to_bandwidth(band.get("q", 1.0))
+
+        params.extend([
+            {"param_index": base + 0, "value": band_type / 8.0},
+            {"param_index": base + 1, "value": freq_norm},
+            {"param_index": base + 2, "value": gain_norm},
+            {"param_index": base + 3, "value": bw_norm},
+            {"param_index": base + 4, "value": 1.0},
+        ])
+
+    track_results = []
+    failures = []
+
+    for track_idx in track_indices:
+        eq_result = await reaper_call("TrackFX_AddByName", track_idx, "ReaEQ", False, -1)
+        eq_idx = eq_result.get("ret", -1)
+        if eq_idx < 0:
+            failures.append({"track": track_idx, "error": "Failed to add ReaEQ"})
+            continue
+
+        set_result = await reaper_call("BatchSetFXParams", track_idx, eq_idx, params)
+        track_results.append({"track": track_idx, "eq_fx_index": eq_idx})
+
+    result = {
+        "ok": len(failures) == 0,
+        "results": track_results,
+        "bands_configured": len(bands),
+        "tracks_processed": len(track_results),
+    }
+    if failures:
+        result["failures"] = failures
+        result["error"] = f"Failed on {len(failures)} of {len(track_indices)} tracks"
+    return result
+
+
+@mcp.tool()
+async def configure_multiband_compressor(track_index: int, fx_index: int, bands: list) -> dict:
+    """Configure ReaXcomp multiband compressor with band settings.
+
+    Args:
+        track_index: Track index (0-based) or -1 for master.
+        fx_index: FX index (0-based) of ReaXcomp in the FX chain.
+        bands: List of band dicts, each with:
+            - threshold (float): Threshold (normalized 0-1)
+            - ratio (float): Ratio (normalized 0-1)
+            - attack (float, optional): Attack (normalized 0-1)
+            - release (float, optional): Release (normalized 0-1)
+
+    Returns:
+        Object with configuration status.
+    """
+    if not bands:
+        return {"ok": False, "error": "No bands specified"}
+    if len(bands) > 4:
+        return {"ok": False, "error": "ReaXcomp supports maximum 4 bands"}
+
+    name_result = await reaper_call("TrackFX_GetFXName", track_index, fx_index)
+    if not name_result.get("ok"):
+        return {"ok": False, "error": "Cannot read FX name", "details": name_result}
+    fx_name = name_result.get("ret", "")
+    if "ReaXcomp" not in fx_name:
+        return {"ok": False, "error": f"FX at index {fx_index} is '{fx_name}', not ReaXcomp"}
+
+    names_result = await reaper_call("GetAllFXParamNames", track_index, fx_index)
+    if not names_result.get("ok"):
+        return {"ok": False, "error": "Cannot discover parameters"}
+
+    param_map = {}
+    for p in names_result.get("params", []):
+        param_map[p["name"].lower()] = p["index"]
+
+    params = []
+    for band_num, band in enumerate(bands):
+        prefix = f"band{band_num + 1}" if band_num > 0 else ""
+        for key in ["threshold", "ratio", "attack", "release"]:
+            if key not in band:
+                continue
+            search = f"{prefix} {key}" if prefix else key
+            search = search.strip().lower()
+            found = None
+            for pname, pidx in param_map.items():
+                if search in pname:
+                    found = pidx
+                    break
+            if found is not None:
+                params.append({"param_index": found, "value": band[key]})
+
+    if not params:
+        return {"ok": False, "error": "Could not match any band parameters to ReaXcomp params"}
+
+    result = await reaper_call("BatchSetFXParams", track_index, fx_index, params)
+
+    return {
+        "ok": result.get("ok", False),
+        "track_index": track_index,
+        "fx_index": fx_index,
+        "bands_configured": len(bands),
+        "params_set": result.get("set_count", 0),
+        "failures": result.get("failures", []),
+    }
+
+
+@mcp.tool()
+async def setup_sidechain_with_filter(
+    trigger_track: int,
+    target_track: int,
+    compressor_fx_index: int,
+    hpf_freq: float = 80.0,
+    send_volume_db: float = 0.0
+) -> dict:
+    """Sidechain compression with HPF on the sidechain signal.
+
+    Creates an intermediate filter track between trigger and target:
+    trigger -> [HPF filter track] -> target sidechain input.
+
+    Args:
+        trigger_track: Track that triggers compression (e.g., kick drum).
+        target_track: Track to be compressed (e.g., bass).
+        compressor_fx_index: Index of ReaComp in target track's FX chain.
+        hpf_freq: High-pass filter frequency in Hz (default 80Hz).
+        send_volume_db: Send volume in dB (default 0dB).
+
+    Returns:
+        Object with filter_track_index, routing info, and FX indices.
+    """
+    count_result = await reaper_call("CountTracks", 0)
+    filter_idx = int(count_result.get("ret", 0))
+
+    await reaper_call("InsertTrackAtIndex", filter_idx, True)
+    await reaper_call("GetSetMediaTrackInfo_String", filter_idx, "P_NAME",
+                       f"SC Filter ({hpf_freq:.0f}Hz HPF)", True)
+
+    eq_result = await reaper_call("TrackFX_AddByName", filter_idx, "ReaEQ", False, -1)
+    eq_idx = eq_result.get("ret", -1)
+    if eq_idx < 0:
+        return {"ok": False, "error": "Failed to add ReaEQ to filter track"}
+
+    hpf_params = [
+        {"param_index": 0, "value": 1.0 / 8.0},
+        {"param_index": 1, "value": _freq_to_normalized(hpf_freq)},
+        {"param_index": 2, "value": 0.5},
+        {"param_index": 3, "value": 0.35},
+        {"param_index": 4, "value": 1.0},
+    ]
+    await reaper_call("BatchSetFXParams", filter_idx, eq_idx, hpf_params)
+
+    send1_result = await reaper_call("CreateTrackSend", trigger_track, filter_idx)
+    if not send1_result.get("ok"):
+        return {"ok": False, "error": "Failed to create send from trigger to filter",
+                "details": send1_result}
+    send1_index = send1_result.get("ret", 0)
+
+    await reaper_call("SetTrackSendUIVol", trigger_track, send1_index,
+                       db_to_linear(send_volume_db), 0)
+
+    send2_result = await reaper_call("CreateTrackSend", filter_idx, target_track)
+    if not send2_result.get("ok"):
+        return {"ok": False, "error": "Failed to create send from filter to target",
+                "details": send2_result}
+    send2_index = send2_result.get("ret", 0)
+
+    await reaper_call("SetTrackSendInfo_Value", filter_idx, 0, send2_index, "I_DSTCHAN", 2)
+
+    await reaper_call("TrackFX_SetParam", target_track, compressor_fx_index, 8, 1.0)
+
+    return {
+        "ok": True,
+        "trigger_track": trigger_track,
+        "filter_track_index": filter_idx,
+        "target_track": target_track,
+        "filter_eq_fx_index": eq_idx,
+        "hpf_frequency": hpf_freq,
+        "compressor_fx_index": compressor_fx_index,
+        "routing": f"Trigger({trigger_track}) -> Filter({filter_idx}) [HPF {hpf_freq}Hz] -> Target({target_track}) SC 3-4",
+        "send_volume_db": send_volume_db,
+    }
 
 
 # --- MAIN ---

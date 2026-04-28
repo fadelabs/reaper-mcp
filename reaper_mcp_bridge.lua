@@ -759,6 +759,75 @@ local function GetTimeSignature()
     return {ok = true, numerator = numerator, denominator = denominator, tempo = bpm}
 end
 
+-- Set multiple FX parameters in one bridge roundtrip
+local function BatchSetFXParams(track_index, fx_index, params)
+    local track = nil
+    if track_index == -1 then
+        track = reaper.GetMasterTrack(0)
+    else
+        track = reaper.GetTrack(0, track_index)
+    end
+    if not track then
+        return {ok = false, error = "Track not found"}
+    end
+
+    local num_params = reaper.TrackFX_GetNumParams(track, fx_index)
+    if num_params == 0 then
+        return {ok = false, error = "FX not found or has no parameters"}
+    end
+
+    local set_count = 0
+    local failures = {__is_array = true}
+
+    for _, p in ipairs(params) do
+        local pi = p.param_index
+        local val = p.value
+        if pi < 0 or pi >= num_params then
+            table.insert(failures, {param_index = pi, error = "out of range"})
+        else
+            local ok = reaper.TrackFX_SetParam(track, fx_index, pi, val)
+            if ok then
+                set_count = set_count + 1
+            else
+                table.insert(failures, {param_index = pi, error = "set failed"})
+            end
+        end
+    end
+
+    return {
+        ok = #failures == 0,
+        set_count = set_count,
+        total_requested = #params,
+        failures = failures
+    }
+end
+
+-- Get all FX parameter names in one bridge roundtrip
+local function GetAllFXParamNames(track_index, fx_index)
+    local track = nil
+    if track_index == -1 then
+        track = reaper.GetMasterTrack(0)
+    else
+        track = reaper.GetTrack(0, track_index)
+    end
+    if not track then
+        return {ok = false, error = "Track not found"}
+    end
+
+    local num_params = reaper.TrackFX_GetNumParams(track, fx_index)
+    if num_params == 0 then
+        return {ok = false, error = "FX not found or has no parameters"}
+    end
+
+    local names = {__is_array = true}
+    for i = 0, num_params - 1 do
+        local retval, name = reaper.TrackFX_GetParamName(track, fx_index, i, "")
+        table.insert(names, {index = i, name = name or ""})
+    end
+
+    return {ok = true, params = names, count = num_params}
+end
+
 -- Get comprehensive project summary for Claude context
 local function GetProjectSummary()
     -- Helper to convert linear volume to dB
@@ -1327,7 +1396,11 @@ DSL_FUNCTIONS = {
     GetProjectRegions = GetProjectRegions,
 
     -- Project summary
-    GetProjectSummary = GetProjectSummary
+    GetProjectSummary = GetProjectSummary,
+
+    -- Batch operations
+    BatchSetFXParams = BatchSetFXParams,
+    GetAllFXParamNames = GetAllFXParamNames
 }
 
 -- Helper to resolve track index to track pointer (-1 = master, 0+ = regular)

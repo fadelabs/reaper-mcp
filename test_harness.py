@@ -1038,6 +1038,221 @@ def test_render_project(b: ReaperBridge) -> TestResult:
     return TestResult("render_project", "FAIL" if fails else "PASS", brief(r), fails, r)
 
 
+# --- Phase 14: Compound Tools ---
+
+
+class CompoundFixture:
+    track_a: int = 0
+    track_b: int = 0
+    track_c: int = 0
+    eq_idx: int = 0
+    comp_idx: int = 0
+
+
+def setup_compound(b: ReaperBridge) -> CompoundFixture:
+    fix = CompoundFixture()
+    count = int(b.call("CountTracks", 0).get("ret", 0))
+    for i, name in enumerate(["CompoundA", "CompoundB", "CompoundC"]):
+        idx = count + i
+        b.call("InsertTrackAtIndex", idx, True)
+        b.call("GetSetMediaTrackInfo_String", idx, "P_NAME", name, True)
+    fix.track_a = count
+    fix.track_b = count + 1
+    fix.track_c = count + 2
+    r1 = b.call("TrackFX_AddByName", count, "ReaEQ", False, -1)
+    fix.eq_idx = int(r1.get("ret", 0))
+    r2 = b.call("TrackFX_AddByName", count, "ReaComp", False, -1)
+    fix.comp_idx = int(r2.get("ret", 1))
+    return fix
+
+
+def teardown_compound(b: ReaperBridge, fix: CompoundFixture):
+    count = int(b.call("CountTracks", 0).get("ret", 0))
+    for idx in range(count - 1, -1, -1):
+        info = b.call("GetTrackInfo", idx)
+        name = info.get("info", info).get("name", "")
+        if name.startswith("Compound") or name.startswith("SC Filter") or name.startswith("TestSubmix") or name.startswith("BatchTrack"):
+            b.call("DeleteTrack", 0, idx)
+
+
+def test_batch_set_fx_params(b: ReaperBridge, fix: CompoundFixture) -> TestResult:
+    params = [
+        {"param_index": 0, "value": 0.25},
+        {"param_index": 1, "value": 0.5},
+        {"param_index": 2, "value": 0.5},
+    ]
+    r = b.call("BatchSetFXParams", fix.track_a, fix.eq_idx, params)
+    fails = expect_ok(r) or check_fields(r, {"set_count": (int, float), "total_requested": (int, float)})
+    if not fails and int(r["set_count"]) != 3:
+        fails.append(f"expected set_count=3, got {r['set_count']}")
+    return TestResult("batch_set_fx_params", "FAIL" if fails else "PASS", brief(r), fails, r)
+
+
+def test_batch_set_fx_params_oor(b: ReaperBridge, fix: CompoundFixture) -> TestResult:
+    params = [
+        {"param_index": 0, "value": 0.5},
+        {"param_index": 999, "value": 0.5},
+    ]
+    r = b.call("BatchSetFXParams", fix.track_a, fix.eq_idx, params)
+    fails = check_fields(r, {"set_count": (int, float), "failures": list})
+    if not fails and int(r.get("set_count", 0)) != 1:
+        fails.append(f"expected set_count=1, got {r.get('set_count')}")
+    if not fails and len(r.get("failures", [])) != 1:
+        fails.append(f"expected 1 failure, got {len(r.get('failures', []))}")
+    return TestResult("batch_set_fx_params_oor", "FAIL" if fails else "PASS", brief(r), fails, r)
+
+
+def test_batch_set_fx_params_empty(b: ReaperBridge, fix: CompoundFixture) -> TestResult:
+    r = b.call("BatchSetFXParams", fix.track_a, fix.eq_idx, [])
+    fails = expect_ok(r)
+    if not fails and int(r.get("set_count", -1)) != 0:
+        fails.append(f"expected set_count=0, got {r.get('set_count')}")
+    return TestResult("batch_set_fx_params_empty", "FAIL" if fails else "PASS", brief(r), fails, r)
+
+
+def test_copy_fx_chain(b: ReaperBridge, fix: CompoundFixture) -> TestResult:
+    src_count = int(b.call("TrackFX_GetCount", fix.track_a).get("ret", 0))
+    if src_count < 2:
+        return TestResult("copy_fx_chain", "SKIP", "source has <2 FX")
+    copied = 0
+    for i in range(src_count):
+        dest_n = int(b.call("TrackFX_GetCount", fix.track_b).get("ret", 0))
+        r = b.call("TrackFX_CopyToTrack", fix.track_a, i, fix.track_b, dest_n, False)
+        if r.get("ok"):
+            copied += 1
+    dest_final = int(b.call("TrackFX_GetCount", fix.track_b).get("ret", 0))
+    fails = []
+    if dest_final != src_count:
+        fails.append(f"dest FX count {dest_final} != source {src_count}")
+    for i in range(dest_final - 1, -1, -1):
+        b.call("TrackFX_Delete", fix.track_b, i)
+    return TestResult("copy_fx_chain", "FAIL" if fails else "PASS", f"copied {copied} FX", fails)
+
+
+def test_batch_create_tracks(b: ReaperBridge) -> TestResult:
+    count_before = int(b.call("CountTracks", 0).get("ret", 0))
+    for i, name in enumerate(["BatchTrack1", "BatchTrack2", "BatchTrack3"]):
+        idx = count_before + i
+        b.call("InsertTrackAtIndex", idx, True)
+        b.call("GetSetMediaTrackInfo_String", idx, "P_NAME", name, True)
+    count_after = int(b.call("CountTracks", 0).get("ret", 0))
+    fails = []
+    if count_after != count_before + 3:
+        fails.append(f"expected {count_before + 3} tracks, got {count_after}")
+    for i in range(2, -1, -1):
+        b.call("DeleteTrack", 0, count_before + i)
+    return TestResult("batch_create_tracks", "FAIL" if fails else "PASS", "created 3 tracks", fails)
+
+
+def test_create_submix(b: ReaperBridge, fix: CompoundFixture) -> TestResult:
+    count = int(b.call("CountTracks", 0).get("ret", 0))
+    bus_idx = count
+    b.call("InsertTrackAtIndex", bus_idx, True)
+    b.call("GetSetMediaTrackInfo_String", bus_idx, "P_NAME", "TestSubmix", True)
+    s1 = b.call("CreateTrackSend", fix.track_a, bus_idx)
+    s2 = b.call("CreateTrackSend", fix.track_b, bus_idx)
+    eq_r = b.call("TrackFX_AddByName", bus_idx, "ReaEQ", False, -1)
+    comp_r = b.call("TrackFX_AddByName", bus_idx, "ReaComp", False, -1)
+    fails = []
+    if not s1.get("ok"):
+        fails.append("send 1 failed")
+    if not s2.get("ok"):
+        fails.append("send 2 failed")
+    if eq_r.get("ret", -1) < 0:
+        fails.append("EQ add failed")
+    if comp_r.get("ret", -1) < 0:
+        fails.append("comp add failed")
+    fx_count = int(b.call("TrackFX_GetCount", bus_idx).get("ret", 0))
+    if fx_count != 2:
+        fails.append(f"bus has {fx_count} FX, expected 2")
+    b.call("DeleteTrack", 0, bus_idx)
+    return TestResult("create_submix", "FAIL" if fails else "PASS", f"bus at {bus_idx}", fails)
+
+
+def test_batch_apply_eq(b: ReaperBridge, fix: CompoundFixture) -> TestResult:
+    eq_r = b.call("TrackFX_AddByName", fix.track_b, "ReaEQ", False, -1)
+    eq_idx = int(eq_r.get("ret", -1))
+    if eq_idx < 0:
+        return TestResult("batch_apply_eq", "FAIL", "ReaEQ add failed", ["ReaEQ not available"])
+    params = []
+    for band in range(2):
+        base = band * 5
+        params.extend([
+            {"param_index": base + 0, "value": 0.25},
+            {"param_index": base + 1, "value": 0.5},
+            {"param_index": base + 2, "value": 0.5},
+            {"param_index": base + 3, "value": 0.5},
+            {"param_index": base + 4, "value": 1.0},
+        ])
+    r = b.call("BatchSetFXParams", fix.track_b, eq_idx, params)
+    fails = []
+    if not r.get("ok"):
+        fails.append(f"batch set failed: {r.get('error')}")
+    if int(r.get("set_count", 0)) != 10:
+        fails.append(f"expected set_count=10, got {r.get('set_count')}")
+    b.call("TrackFX_Delete", fix.track_b, eq_idx)
+    return TestResult("batch_apply_eq", "FAIL" if fails else "PASS",
+                      f"set {r.get('set_count', 0)} params", fails, r)
+
+
+def test_configure_multiband_comp(b: ReaperBridge, fix: CompoundFixture) -> TestResult:
+    xcomp_r = b.call("TrackFX_AddByName", fix.track_c, "ReaXcomp", False, -1)
+    xcomp_idx = int(xcomp_r.get("ret", -1))
+    if xcomp_idx < 0:
+        return TestResult("configure_multiband_comp", "SKIP", "ReaXcomp not available")
+    params = [{"param_index": 0, "value": 0.5}, {"param_index": 1, "value": 0.3}]
+    r = b.call("BatchSetFXParams", fix.track_c, xcomp_idx, params)
+    fails = []
+    if not r.get("ok"):
+        fails.append(f"param set failed: {r.get('error')}")
+    b.call("TrackFX_Delete", fix.track_c, xcomp_idx)
+    return TestResult("configure_multiband_comp", "FAIL" if fails else "PASS", brief(r), fails, r)
+
+
+def test_sidechain_with_filter(b: ReaperBridge, fix: CompoundFixture) -> TestResult:
+    comp_r = b.call("TrackFX_AddByName", fix.track_b, "ReaComp", False, -1)
+    comp_idx = int(comp_r.get("ret", -1))
+    if comp_idx < 0:
+        return TestResult("sidechain_with_filter", "FAIL", "ReaComp add failed",
+                         ["ReaComp not available"])
+    count = int(b.call("CountTracks", 0).get("ret", 0))
+    filter_idx = count
+    b.call("InsertTrackAtIndex", filter_idx, True)
+    b.call("GetSetMediaTrackInfo_String", filter_idx, "P_NAME", "SC Filter", True)
+    eq_r = b.call("TrackFX_AddByName", filter_idx, "ReaEQ", False, -1)
+    s1 = b.call("CreateTrackSend", fix.track_a, filter_idx)
+    s2 = b.call("CreateTrackSend", filter_idx, fix.track_b)
+    fails = []
+    if not s1.get("ok"):
+        fails.append("trigger -> filter send failed")
+    if not s2.get("ok"):
+        fails.append("filter -> target send failed")
+    if s2.get("ok"):
+        b.call("SetTrackSendInfo_Value", filter_idx, 0, int(s2.get("ret", 0)), "I_DSTCHAN", 2)
+    b.call("TrackFX_SetParam", fix.track_b, comp_idx, 8, 1.0)
+    filter_fx = int(b.call("TrackFX_GetCount", filter_idx).get("ret", 0))
+    if filter_fx < 1:
+        fails.append("filter track has no EQ")
+    b.call("DeleteTrack", 0, filter_idx)
+    b.call("TrackFX_Delete", fix.track_b, comp_idx)
+    return TestResult("sidechain_with_filter", "FAIL" if fails else "PASS",
+                      f"filter at {filter_idx}", fails)
+
+
+def test_get_all_fx_param_names(b: ReaperBridge, fix: CompoundFixture) -> TestResult:
+    r = b.call("GetAllFXParamNames", fix.track_a, fix.eq_idx)
+    fails = expect_ok(r) or check_fields(r, {"params": list, "count": (int, float)})
+    if not fails and int(r["count"]) < 1:
+        fails.append(f"expected >=1 params, got {r['count']}")
+    if not fails and len(r["params"]) < 1:
+        fails.append("params array empty")
+    if not fails:
+        first = r["params"][0]
+        if "index" not in first or "name" not in first:
+            fails.append("param entry missing index/name keys")
+    return TestResult("get_all_fx_param_names", "FAIL" if fails else "PASS", brief(r), fails, r)
+
+
 # ===================================================================
 # TEST GROUPS
 # ===================================================================
@@ -1229,6 +1444,24 @@ GROUPS = [
         "category": "render",
         "tests": [
             ("render_project", lambda b, _: test_render_project(b)),
+        ],
+    },
+    {
+        "name": "Compound Tools",
+        "category": "compound",
+        "setup": setup_compound,
+        "teardown": teardown_compound,
+        "tests": [
+            ("batch_set_fx_params", lambda b, f: test_batch_set_fx_params(b, f)),
+            ("batch_set_fx_params_oor", lambda b, f: test_batch_set_fx_params_oor(b, f)),
+            ("batch_set_fx_params_empty", lambda b, f: test_batch_set_fx_params_empty(b, f)),
+            ("copy_fx_chain", lambda b, f: test_copy_fx_chain(b, f)),
+            ("batch_create_tracks", lambda b, _: test_batch_create_tracks(b)),
+            ("create_submix", lambda b, f: test_create_submix(b, f)),
+            ("batch_apply_eq", lambda b, f: test_batch_apply_eq(b, f)),
+            ("configure_multiband_comp", lambda b, f: test_configure_multiband_comp(b, f)),
+            ("sidechain_with_filter", lambda b, f: test_sidechain_with_filter(b, f)),
+            ("get_all_fx_param_names", lambda b, f: test_get_all_fx_param_names(b, f)),
         ],
     },
 ]
