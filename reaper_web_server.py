@@ -1,14 +1,18 @@
 """
 REAPER Web Server - ReaScript HTTP API
 
+DEPRECATED: This Python HTTP bridge is no longer maintained. It is missing
+handlers for ~30 MCP tool functions (MIDI, envelopes, FX presets, rendering,
+and more). Use one of the Lua alternatives instead:
+  - reaper_mcp_bridge.lua (file-based, default, most complete)
+  - reaper_web_server.lua (HTTP-based, full coverage)
+
+This file is kept for backwards compatibility but will not receive updates.
+
+---
+
 This script runs inside REAPER and exposes an HTTP API for controlling REAPER.
 Zero external dependencies - uses only Python stdlib and REAPER's RPR_* functions.
-
-Usage:
-1. Load this script in REAPER (Actions -> Show action list -> Load ReaScript)
-2. Run the script
-3. Server starts on localhost:9000
-4. Use HTTP requests to control REAPER
 
 Author: TwelveTake Studios LLC
 License: MIT

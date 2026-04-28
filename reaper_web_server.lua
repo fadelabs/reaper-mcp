@@ -100,19 +100,109 @@ local function json_encode(obj)
 end
 
 local function json_decode(str)
-  -- Simple JSON decoder
-  if str == nil or str == "" then return nil end
+  if not str or str == "" then return nil end
 
-  -- Use Lua's load for simple cases (security note: only use with trusted input)
-  str = str:gsub('"([^"]-)":', '["%1"]=')
-           :gsub('null', 'nil')
-           :gsub('true', 'true')
-           :gsub('false', 'false')
+  str = str:gsub("^%s*(.-)%s*$", "%1")
 
-  local func = load("return " .. str)
-  if func then
-    local ok, result = pcall(func)
-    if ok then return result end
+  if str == "null" then return nil
+  elseif str == "true" then return true
+  elseif str == "false" then return false
+  elseif str:match("^%-?%d+%.?%d*$") then return tonumber(str)
+  elseif str:match('^"(.*)"$') then
+    local s = str:match('^"(.*)"$')
+    s = s:gsub('\\n', '\n'):gsub('\\r', '\r'):gsub('\\"', '"'):gsub('\\\\', '\\')
+    return s
+  elseif str:match("^%[.*%]$") then
+    local arr = {}
+    local content = str:sub(2, -2)
+    if content:match("^%s*$") then return arr end
+    local i = 1
+    local pos = 1
+    local depth = 0
+    local in_string = false
+    local escape = false
+    local start = 1
+
+    while pos <= #content do
+      local char = content:sub(pos, pos)
+      if escape then
+        escape = false
+      elseif char == '\\' then
+        escape = true
+      elseif char == '"' then
+        in_string = not in_string
+      elseif not in_string then
+        if char == '[' or char == '{' then
+          depth = depth + 1
+        elseif char == ']' or char == '}' then
+          depth = depth - 1
+        elseif char == ',' and depth == 0 then
+          local value = content:sub(start, pos - 1)
+          arr[i] = json_decode(value:match("^%s*(.-)%s*$"))
+          i = i + 1
+          start = pos + 1
+        end
+      end
+      pos = pos + 1
+    end
+
+    if start <= #content then
+      local value = content:sub(start)
+      arr[i] = json_decode(value:match("^%s*(.-)%s*$"))
+    end
+    return arr
+  elseif str:match("^{.*}$") then
+    local obj = {}
+    local content = str:sub(2, -2)
+
+    local pos = 1
+    while pos <= #content do
+      local key_start = content:find('"', pos)
+      if not key_start then break end
+      local key_end = content:find('"', key_start + 1)
+      if not key_end then break end
+      local key = content:sub(key_start + 1, key_end - 1)
+
+      local colon = content:find(':', key_end + 1)
+      if not colon then break end
+
+      local value_start = colon + 1
+      while value_start <= #content and content:sub(value_start, value_start):match("%s") do
+        value_start = value_start + 1
+      end
+
+      local value_end = value_start
+      local depth = 0
+      local in_string = false
+      local escape = false
+
+      while value_end <= #content do
+        local char = content:sub(value_end, value_end)
+        if escape then
+          escape = false
+        elseif char == '\\' then
+          escape = true
+        elseif char == '"' then
+          in_string = not in_string
+        elseif not in_string then
+          if char == '[' or char == '{' then
+            depth = depth + 1
+          elseif char == ']' or char == '}' then
+            depth = depth - 1
+          elseif (char == ',' or char == '}') and depth == 0 then
+            break
+          end
+        end
+        value_end = value_end + 1
+      end
+
+      local value = content:sub(value_start, value_end - 1)
+      obj[key] = json_decode(value:match("^%s*(.-)%s*$"))
+
+      pos = value_end + 1
+    end
+
+    return obj
   end
   return nil
 end
@@ -163,7 +253,7 @@ local function send_response(client_socket, status_code, status_text, body)
   local response = string.format(
     "HTTP/1.1 %d %s\r\n" ..
     "Content-Type: application/json\r\n" ..
-    "Access-Control-Allow-Origin: *\r\n" ..
+    "Access-Control-Allow-Origin: http://localhost\r\n" ..
     "Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS\r\n" ..
     "Access-Control-Allow-Headers: Content-Type\r\n" ..
     "Content-Length: %d\r\n" ..
@@ -515,6 +605,20 @@ local function handle_function_call(func_name, args)
       return {ok = false, error = "Track not found"}
     end
     return {ok = true, ret = get_track_info(track)}
+
+  elseif func_name == "GetTrackFXList" then
+    local track = get_track_by_index(args[1])
+    if not track then
+      return {ok = false, error = "Track not found"}
+    end
+    local fx_count = reaper.TrackFX_GetCount(track)
+    local fx_list = {}
+    for i = 0, fx_count - 1 do
+      local _, fx_name = reaper.TrackFX_GetFXName(track, i, "")
+      local enabled = reaper.TrackFX_GetEnabled(track, i)
+      table.insert(fx_list, {index = i, name = fx_name, enabled = enabled})
+    end
+    return {ok = true, track_index = args[1], fx = fx_list}
 
   elseif func_name == "GetAllTracksInfo" then
     local count = reaper.CountTracks(0)

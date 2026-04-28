@@ -16,6 +16,7 @@ __version__ = "1.1.0"
 __package_name__ = "twelvetake-reaper-mcp"
 
 import os
+import sys
 import asyncio
 import json
 import time
@@ -40,10 +41,16 @@ REAPER_PORT = int(os.getenv("REAPER_PORT", "9000"))
 REAPER_URL = f"http://{REAPER_HOST}:{REAPER_PORT}"
 
 # File-based fallback configuration
-BRIDGE_DIR = Path(os.getenv(
-    "REAPER_BRIDGE_DIR",
-    os.path.expandvars(r"%APPDATA%\REAPER\Scripts\mcp_bridge_data")
-))
+def _default_bridge_dir() -> str:
+    """Platform-appropriate default bridge directory."""
+    if sys.platform == "darwin":
+        return os.path.expanduser("~/Library/Application Support/REAPER/Scripts/mcp_bridge_data")
+    elif sys.platform == "win32":
+        return os.path.expandvars(r"%APPDATA%\REAPER\Scripts\mcp_bridge_data")
+    else:  # Linux
+        return os.path.expanduser("~/.config/REAPER/Scripts/mcp_bridge_data")
+
+BRIDGE_DIR = Path(os.getenv("REAPER_BRIDGE_DIR", _default_bridge_dir()))
 FILE_TIMEOUT = 5.0
 FILE_POLL_INTERVAL = 0.02
 
@@ -56,15 +63,15 @@ mcp = FastMCP("twelvetake-reaper-mcp")
 # Request counter for file-based fallback
 request_counter = 0
 
-# HTTP client (reused for connection pooling)
+# Async HTTP client (reused for connection pooling)
 _http_client = None
 
 
 def get_http_client():
-    """Get or create HTTP client."""
+    """Get or create async HTTP client."""
     global _http_client
     if _http_client is None and HTTPX_AVAILABLE:
-        _http_client = httpx.Client(timeout=5.0)
+        _http_client = httpx.AsyncClient(timeout=5.0)
     return _http_client
 
 
@@ -80,7 +87,7 @@ async def reaper_call_http(func: str, args: list) -> dict:
         return {"ok": False, "error": "HTTP client not available", "fallback": True}
 
     try:
-        response = client.post(
+        response = await client.post(
             f"{REAPER_URL}/call",
             json={"func": func, "args": args},
             timeout=5.0
@@ -114,11 +121,13 @@ async def reaper_call_file(func: str, args: list) -> dict:
         # Clean up old response file
         try:
             response_file.unlink(missing_ok=True)
-        except:
+        except OSError:
             pass
 
-        # Write request
-        request_file.write_text(json.dumps(request_data))
+        # Write request atomically (temp file + rename)
+        tmp_file = request_file.with_suffix('.tmp')
+        tmp_file.write_text(json.dumps(request_data))
+        tmp_file.rename(request_file)
 
         # Wait for response
         start_time = time.time()
@@ -132,7 +141,7 @@ async def reaper_call_file(func: str, args: list) -> dict:
                         try:
                             request_file.unlink(missing_ok=True)
                             response_file.unlink(missing_ok=True)
-                        except:
+                        except OSError:
                             pass
                         return response_data
                 except json.JSONDecodeError:
@@ -142,7 +151,7 @@ async def reaper_call_file(func: str, args: list) -> dict:
         # Timeout
         try:
             request_file.unlink(missing_ok=True)
-        except:
+        except OSError:
             pass
 
         return {
@@ -158,11 +167,10 @@ async def reaper_call(func: str, *args) -> dict:
     """
     Call a REAPER function via bridge.
 
-    Uses HTTP by default, falls back to file-based if HTTP unavailable.
-    Set REAPER_COMM_MODE environment variable to force a mode:
+    Set REAPER_COMM_MODE environment variable to choose a mode:
+    - "file": File-based only (default)
     - "http": HTTP only
-    - "file": File-based only
-    - "auto": HTTP with file fallback (default)
+    - "auto": HTTP with file fallback
     """
     args_list = list(args)
 
@@ -339,8 +347,7 @@ async def track_fx_get_list(track_index: int) -> dict:
     Returns:
         Object with 'fx' array containing each FX's index, name, and enabled state.
     """
-    # Use the DSL function which returns detailed info
-    return await reaper_call("GetTrackInfo", track_index)
+    return await reaper_call("GetTrackFXList", track_index)
 
 
 @mcp.tool()
@@ -574,12 +581,11 @@ async def setup_sidechain_send(src_track: int, dest_track: int, volume_db: float
     Returns:
         Object with send_index and routing info.
     """
-    # Create the send
     send_result = await reaper_call("CreateTrackSend", src_track, dest_track)
-    send_index = send_result.get("ret", 0)
-
     if not send_result.get("ok", False):
         return send_result
+
+    send_index = send_result.get("ret", 0)
 
     # Route to channels 3-4 (sidechain input)
     # I_DSTCHAN: 0=1-2, 2=3-4 (sidechain), 4=5-6, etc.
@@ -779,11 +785,22 @@ async def add_mastering_chain() -> dict:
         Object with list of added FX indices.
     """
     results = []
+    failures = []
     fx_chain = ["ReaEQ", "ReaComp", "ReaEQ", "ReaLimit"]
 
     for fx_name in fx_chain:
         result = await reaper_call("TrackFX_AddByName", -1, fx_name, False, -1)
         results.append(result)
+        if result.get("ret", -1) < 0:
+            failures.append(fx_name)
+
+    if failures:
+        return {
+            "ok": False,
+            "error": f"Failed to add FX: {', '.join(failures)}. Plugins may not be installed.",
+            "added_fx": results,
+            "chain": fx_chain
+        }
 
     return {
         "ok": True,
@@ -808,27 +825,28 @@ async def add_parallel_compression(track_index: int, blend_db: float = -6.0) -> 
     Returns:
         Object with bus_track_index, send_index, and compressor_fx_index.
     """
-    # Get current track count
     count_result = await reaper_call("CountTracks", 0)
     new_track_index = count_result.get("ret", 0)
 
-    # Create parallel compression bus
     await reaper_call("InsertTrackAtIndex", new_track_index, True)
-    await reaper_call("GetSetMediaTrackInfo_String", 0, new_track_index, "P_NAME", "Parallel Comp Bus", True)
+    await reaper_call("GetSetMediaTrackInfo_String", new_track_index, "P_NAME", "Parallel Comp Bus", True)
 
-    # Create send from source to bus
     send_result = await reaper_call("CreateTrackSend", track_index, new_track_index)
+    if not send_result.get("ok"):
+        return {"ok": False, "error": "Failed to create send to parallel comp bus", "details": send_result}
 
-    await reaper_call("SetTrackSendUIVol", track_index, send_result.get("ret", 0), db_to_linear(blend_db), 0)
+    send_index = send_result.get("ret", 0)
+    await reaper_call("SetTrackSendUIVol", track_index, send_index, db_to_linear(blend_db), 0)
 
-    # Add compressor
     comp_result = await reaper_call("TrackFX_AddByName", new_track_index, "ReaComp", False, -1)
+    if comp_result.get("ret", -1) < 0:
+        return {"ok": False, "error": "Failed to add ReaComp. Plugin may not be installed."}
 
     return {
         "ok": True,
         "source_track": track_index,
         "bus_track_index": new_track_index,
-        "send_index": send_result.get("ret"),
+        "send_index": send_index,
         "compressor_fx_index": comp_result.get("ret"),
         "blend_db": blend_db,
         "note": "Configure compressor for heavy compression. Adjust send level to taste."
@@ -853,24 +871,31 @@ async def create_bus(name: str, source_track_indices: list[int]) -> dict:
 
     # Create bus track
     await reaper_call("InsertTrackAtIndex", new_track_index, True)
-    await reaper_call("GetSetMediaTrackInfo_String", 0, new_track_index, "P_NAME", name, True)
+    await reaper_call("GetSetMediaTrackInfo_String", new_track_index, "P_NAME", name, True)
 
     # Create sends from each source track
     sends_created = []
+    send_failures = []
     for src_idx in source_track_indices:
         send_result = await reaper_call("CreateTrackSend", src_idx, new_track_index)
-        sends_created.append({
-            "source_track": src_idx,
-            "send_index": send_result.get("ret")
-        })
+        if send_result.get("ok"):
+            sends_created.append({
+                "source_track": src_idx,
+                "send_index": send_result.get("ret")
+            })
+        else:
+            send_failures.append(src_idx)
 
-    return {
-        "ok": True,
+    result = {
+        "ok": len(send_failures) == 0,
         "bus_track_index": new_track_index,
         "bus_name": name,
         "sends": sends_created,
         "note": f"Created bus '{name}' with {len(sends_created)} sends."
     }
+    if send_failures:
+        result["error"] = f"Failed to create sends from tracks: {send_failures}"
+    return result
 
 
 @mcp.tool()
@@ -973,6 +998,9 @@ async def add_midi_note(
     Returns:
         Object with note index.
     """
+    pitch = max(0, min(127, pitch))
+    velocity = max(1, min(127, velocity))
+    channel = max(0, min(15, channel))
     return await reaper_call("MIDI_InsertNote", track_index, item_index, False, False, start_ppq, end_ppq, channel, pitch, velocity, False)
 
 
@@ -1077,6 +1105,7 @@ async def set_midi_note_velocity(
     Returns:
         Object with success status.
     """
+    velocity = max(1, min(127, velocity))
     return await reaper_call("MIDI_SetNote", track_index, item_index, note_index, None, None, None, None, None, velocity, False)
 
 
@@ -1311,10 +1340,7 @@ async def create_project(name: str = None) -> dict:
     Returns:
         Object with success status.
     """
-    result = await reaper_call("Main_OnCommand", 40023, 0)  # File: New project
-    if name:
-        await reaper_call("Main_SaveProject", 0, False)
-    return result
+    return await reaper_call("Main_OnCommand", 40023, 0)  # File: New project
 
 
 @mcp.tool()

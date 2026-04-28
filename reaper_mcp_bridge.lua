@@ -268,6 +268,34 @@ local function GetTrackInfo(track_index)
     }
 end
 
+-- Get list of all FX plugins on a track with index, name, and enabled state
+local function GetTrackFXList(track_index)
+    local track = nil
+    if track_index == -1 then
+        track = reaper.GetMasterTrack(0)
+    else
+        track = reaper.GetTrack(0, track_index)
+    end
+
+    if not track then
+        return {ok = false, error = "Track not found"}
+    end
+
+    local fx_count = reaper.TrackFX_GetCount(track)
+    local fx_list = {}
+    for i = 0, fx_count - 1 do
+        local retval, fx_name = reaper.TrackFX_GetFXName(track, i, "")
+        local enabled = reaper.TrackFX_GetEnabled(track, i)
+        table.insert(fx_list, {
+            index = i,
+            name = fx_name,
+            enabled = enabled
+        })
+    end
+
+    return {ok = true, track_index = track_index, fx = fx_list}
+end
+
 -- Get all tracks with detailed info
 local function GetAllTracksInfo()
     local tracks = {}
@@ -1226,6 +1254,7 @@ end
 DSL_FUNCTIONS = {
     -- Track info
     GetTrackInfo = GetTrackInfo,
+    GetTrackFXList = GetTrackFXList,
     GetAllTracksInfo = GetAllTracksInfo,
     GetSelectedTracks = GetSelectedTracks,
     SetTrackNotes = SetTrackNotes,
@@ -1298,6 +1327,18 @@ DSL_FUNCTIONS = {
     -- Project summary
     GetProjectSummary = GetProjectSummary
 }
+
+-- Helper to resolve track index to track pointer (-1 = master, 0+ = regular)
+local function get_track(track_index)
+    if track_index == -1 then
+        return reaper.GetMasterTrack(0)
+    end
+    local count = reaper.CountTracks(0)
+    if track_index >= 0 and track_index < count then
+        return reaper.GetTrack(0, track_index)
+    end
+    return nil
+end
 
 -- Main processing function
 local function process_request()
@@ -4866,6 +4907,554 @@ local function process_request()
                             response.ok = false
                         end
                     
+                    -- Transport
+                    elseif fname == "OnPlayButton" then
+                        reaper.OnPlayButton()
+                        response.ok = true
+
+                    elseif fname == "OnStopButton" then
+                        reaper.OnStopButton()
+                        response.ok = true
+
+                    elseif fname == "OnPauseButton" then
+                        reaper.OnPauseButton()
+                        response.ok = true
+
+                    elseif fname == "OnRecordButton" then
+                        reaper.OnRecordButton()
+                        response.ok = true
+
+                    elseif fname == "GetPlayPosition" then
+                        response.ok = true
+                        response.ret = reaper.GetPlayPosition()
+
+                    -- Undo/Redo
+                    elseif fname == "Undo_DoUndo2" then
+                        response.ok = true
+                        response.ret = reaper.Undo_DoUndo2(args[1] or 0)
+
+                    elseif fname == "Undo_DoRedo2" then
+                        response.ok = true
+                        response.ret = reaper.Undo_DoRedo2(args[1] or 0)
+
+                    elseif fname == "GetUndoState" then
+                        response.ok = true
+                        response.can_undo = reaper.Undo_CanUndo2(0) or ""
+                        response.can_redo = reaper.Undo_CanRedo2(0) or ""
+
+                    -- Project
+                    elseif fname == "GetProjectLength" then
+                        response.ok = true
+                        response.ret = reaper.GetProjectLength(args[1] or 0)
+
+                    elseif fname == "SetCurrentBPM" then
+                        reaper.SetCurrentBPM(args[1] or 0, args[2], args[3])
+                        response.ok = true
+
+                    elseif fname == "SetTimeSignature" then
+                        -- Use tempo/time sig marker at position 0
+                        local tempo = reaper.Master_GetTempo()
+                        reaper.SetTempoTimeSigMarker(0, -1, 0, -1, -1, tempo, args[1], args[2], false)
+                        reaper.UpdateTimeline()
+                        response.ok = true
+
+                    elseif fname == "Main_OnCommandEx" then
+                        local cmd = args[1]
+                        if type(cmd) == "string" then
+                            cmd = reaper.NamedCommandLookup(cmd)
+                        end
+                        reaper.Main_OnCommand(cmd, args[2] or 0)
+                        response.ok = true
+
+                    -- Markers/Regions
+                    elseif fname == "AddProjectMarker2" then
+                        local idx = reaper.AddProjectMarker2(args[1] or 0, args[2], args[3], args[4], args[5] or "", args[6] or -1, args[7] or 0)
+                        response.ok = true
+                        response.ret = idx
+
+                    elseif fname == "GoToRegion" then
+                        reaper.GoToRegion(args[1] or 0, args[2], args[3] or false)
+                        response.ok = true
+
+                    -- Media Items
+                    elseif fname == "GetItemInfo" then
+                        local track = get_track(args[1])
+                        if not track then
+                            response.ok = false
+                            response.error = "Track not found"
+                        else
+                            local item = reaper.GetTrackMediaItem(track, args[2])
+                            if not item then
+                                response.ok = false
+                                response.error = "Item not found"
+                            else
+                                response.ok = true
+                                response.position = reaper.GetMediaItemInfo_Value(item, "D_POSITION")
+                                response.length = reaper.GetMediaItemInfo_Value(item, "D_LENGTH")
+                                response.mute = reaper.GetMediaItemInfo_Value(item, "B_MUTE") == 1
+                                response.volume = reaper.GetMediaItemInfo_Value(item, "D_VOL")
+                                response.fadein = reaper.GetMediaItemInfo_Value(item, "D_FADEINLEN")
+                                response.fadeout = reaper.GetMediaItemInfo_Value(item, "D_FADEOUTLEN")
+                            end
+                        end
+
+                    elseif fname == "SetMediaItemInfo_Value" then
+                        local track = get_track(args[1])
+                        if not track then
+                            response.ok = false
+                            response.error = "Track not found"
+                        else
+                            local item = reaper.GetTrackMediaItem(track, args[2])
+                            if not item then
+                                response.ok = false
+                                response.error = "Item not found"
+                            else
+                                reaper.SetMediaItemInfo_Value(item, args[3], args[4])
+                                reaper.UpdateArrange()
+                                response.ok = true
+                            end
+                        end
+
+                    elseif fname == "SplitMediaItem" then
+                        local track = get_track(args[1])
+                        if not track then
+                            response.ok = false
+                            response.error = "Track not found"
+                        else
+                            local item = reaper.GetTrackMediaItem(track, args[2])
+                            if not item then
+                                response.ok = false
+                                response.error = "Item not found"
+                            else
+                                local new_item = reaper.SplitMediaItem(item, args[3])
+                                response.ok = new_item ~= nil
+                                if not response.ok then
+                                    response.error = "Split failed - position may be outside item bounds"
+                                end
+                            end
+                        end
+
+                    elseif fname == "DuplicateItem" then
+                        local track = get_track(args[1])
+                        if not track then
+                            response.ok = false
+                            response.error = "Track not found"
+                        else
+                            local item = reaper.GetTrackMediaItem(track, args[2])
+                            if not item then
+                                response.ok = false
+                                response.error = "Item not found"
+                            else
+                                reaper.Main_OnCommand(40289, 0) -- Unselect all items
+                                reaper.SetMediaItemSelected(item, true)
+                                reaper.Main_OnCommand(41295, 0) -- Duplicate items
+                                response.ok = true
+                            end
+                        end
+
+                    -- MIDI Operations
+                    elseif fname == "CreateMIDIItem" then
+                        local track = get_track(args[1])
+                        if not track then
+                            response.ok = false
+                            response.error = "Track not found"
+                        else
+                            local item = reaper.CreateNewMIDIItemInProj(track, args[2], args[3])
+                            response.ok = item ~= nil
+                            if not response.ok then
+                                response.error = "Failed to create MIDI item"
+                            end
+                        end
+
+                    elseif fname == "GetMIDIItemInfo" then
+                        local track = get_track(args[1])
+                        if not track then
+                            response.ok = false
+                            response.error = "Track not found"
+                        else
+                            local item = reaper.GetTrackMediaItem(track, args[2])
+                            if not item then
+                                response.ok = false
+                                response.error = "Item not found"
+                            else
+                                local take = reaper.GetActiveTake(item)
+                                if not take or not reaper.TakeIsMIDI(take) then
+                                    response.ok = false
+                                    response.error = "Item is not a MIDI item"
+                                else
+                                    local _, note_count, _, _ = reaper.MIDI_CountEvts(take)
+                                    response.ok = true
+                                    response.position = reaper.GetMediaItemInfo_Value(item, "D_POSITION")
+                                    response.length = reaper.GetMediaItemInfo_Value(item, "D_LENGTH")
+                                    response.note_count = note_count
+                                end
+                            end
+                        end
+
+                    elseif fname == "MIDI_InsertNote" then
+                        local track = get_track(args[1])
+                        if not track then
+                            response.ok = false
+                            response.error = "Track not found"
+                        else
+                            local item = reaper.GetTrackMediaItem(track, args[2])
+                            if not item then
+                                response.ok = false
+                                response.error = "Item not found"
+                            else
+                                local take = reaper.GetActiveTake(item)
+                                if not take then
+                                    response.ok = false
+                                    response.error = "No active take"
+                                else
+                                    -- args: track, item, selected, muted, start_ppq, end_ppq, chan, pitch, vel, noSort
+                                    local ret = reaper.MIDI_InsertNote(take, args[3], args[4], args[5], args[6], args[7], args[8], args[9], args[10] or false)
+                                    reaper.MIDI_Sort(take)
+                                    response.ok = ret
+                                end
+                            end
+                        end
+
+                    elseif fname == "GetMIDINotes" then
+                        local track = get_track(args[1])
+                        if not track then
+                            response.ok = false
+                            response.error = "Track not found"
+                        else
+                            local item = reaper.GetTrackMediaItem(track, args[2])
+                            if not item then
+                                response.ok = false
+                                response.error = "Item not found"
+                            else
+                                local take = reaper.GetActiveTake(item)
+                                if not take then
+                                    response.ok = false
+                                    response.error = "No active take"
+                                else
+                                    local _, note_count, _, _ = reaper.MIDI_CountEvts(take)
+                                    local notes = {}
+                                    for i = 0, note_count - 1 do
+                                        local retval, sel, muted, start_ppq, end_ppq, chan, pitch, vel = reaper.MIDI_GetNote(take, i)
+                                        table.insert(notes, {
+                                            index = i,
+                                            selected = sel,
+                                            muted = muted,
+                                            start_ppq = start_ppq,
+                                            end_ppq = end_ppq,
+                                            channel = chan,
+                                            pitch = pitch,
+                                            velocity = vel
+                                        })
+                                    end
+                                    response.ok = true
+                                    response.notes = notes
+                                end
+                            end
+                        end
+
+                    elseif fname == "MIDI_DeleteNote" then
+                        local track = get_track(args[1])
+                        if not track then
+                            response.ok = false
+                            response.error = "Track not found"
+                        else
+                            local item = reaper.GetTrackMediaItem(track, args[2])
+                            if not item then
+                                response.ok = false
+                                response.error = "Item not found"
+                            else
+                                local take = reaper.GetActiveTake(item)
+                                if not take then
+                                    response.ok = false
+                                    response.error = "No active take"
+                                else
+                                    local ret = reaper.MIDI_DeleteNote(take, args[3])
+                                    reaper.MIDI_Sort(take)
+                                    response.ok = ret
+                                end
+                            end
+                        end
+
+                    elseif fname == "ClearMIDIItem" then
+                        local track = get_track(args[1])
+                        if not track then
+                            response.ok = false
+                            response.error = "Track not found"
+                        else
+                            local item = reaper.GetTrackMediaItem(track, args[2])
+                            if not item then
+                                response.ok = false
+                                response.error = "Item not found"
+                            else
+                                local take = reaper.GetActiveTake(item)
+                                if not take then
+                                    response.ok = false
+                                    response.error = "No active take"
+                                else
+                                    local _, note_count, _, _ = reaper.MIDI_CountEvts(take)
+                                    for i = note_count - 1, 0, -1 do
+                                        reaper.MIDI_DeleteNote(take, i)
+                                    end
+                                    reaper.MIDI_Sort(take)
+                                    response.ok = true
+                                    response.deleted = note_count
+                                end
+                            end
+                        end
+
+                    -- Envelope Operations
+                    elseif fname == "CountEnvelopePoints" then
+                        local track = get_track(args[1])
+                        if not track then
+                            response.ok = false
+                            response.error = "Track not found"
+                        else
+                            local env = reaper.GetTrackEnvelopeByName(track, args[2])
+                            if not env then
+                                response.ok = false
+                                response.error = "Envelope not found: " .. tostring(args[2])
+                            else
+                                response.ok = true
+                                response.ret = reaper.CountEnvelopePoints(env)
+                            end
+                        end
+
+                    elseif fname == "GetEnvelopePoints" then
+                        local track = get_track(args[1])
+                        if not track then
+                            response.ok = false
+                            response.error = "Track not found"
+                        else
+                            local env = reaper.GetTrackEnvelopeByName(track, args[2])
+                            if not env then
+                                response.ok = false
+                                response.error = "Envelope not found: " .. tostring(args[2])
+                            else
+                                local count = reaper.CountEnvelopePoints(env)
+                                local points = {}
+                                for i = 0, count - 1 do
+                                    local retval, time, value, shape, tension, selected = reaper.GetEnvelopePoint(env, i)
+                                    table.insert(points, {
+                                        index = i,
+                                        time = time,
+                                        value = value,
+                                        shape = shape,
+                                        tension = tension,
+                                        selected = selected
+                                    })
+                                end
+                                response.ok = true
+                                response.points = points
+                            end
+                        end
+
+                    elseif fname == "DeleteEnvelopePoint" then
+                        local track = get_track(args[1])
+                        if not track then
+                            response.ok = false
+                            response.error = "Track not found"
+                        else
+                            local env = reaper.GetTrackEnvelopeByName(track, args[2])
+                            if not env then
+                                response.ok = false
+                                response.error = "Envelope not found: " .. tostring(args[2])
+                            else
+                                local point_idx = args[3]
+                                local retval, pt_time = reaper.GetEnvelopePoint(env, point_idx)
+                                if retval then
+                                    reaper.DeleteEnvelopePointRange(env, pt_time - 0.0001, pt_time + 0.0001)
+                                    response.ok = true
+                                else
+                                    response.ok = false
+                                    response.error = "Point index out of range: " .. tostring(point_idx)
+                                end
+                            end
+                        end
+
+                    elseif fname == "ClearEnvelope" then
+                        local track = get_track(args[1])
+                        if not track then
+                            response.ok = false
+                            response.error = "Track not found"
+                        else
+                            local env = reaper.GetTrackEnvelopeByName(track, args[2])
+                            if not env then
+                                response.ok = false
+                                response.error = "Envelope not found: " .. tostring(args[2])
+                            else
+                                local count = reaper.CountEnvelopePoints(env)
+                                if count > 0 then
+                                    local _, last_time = reaper.GetEnvelopePoint(env, count - 1)
+                                    reaper.DeleteEnvelopePointRange(env, 0, last_time + 1)
+                                end
+                                response.ok = true
+                            end
+                        end
+
+                    elseif fname == "SetEnvelopeArm" then
+                        local track = get_track(args[1])
+                        if not track then
+                            response.ok = false
+                            response.error = "Track not found"
+                        else
+                            local env = reaper.GetTrackEnvelopeByName(track, args[2])
+                            if not env then
+                                response.ok = false
+                                response.error = "Envelope not found: " .. tostring(args[2])
+                            else
+                                local _, chunk = reaper.GetEnvelopeStateChunk(env, "", false)
+                                local arm_val = args[3] and "1" or "0"
+                                chunk = chunk:gsub("ARM %d", "ARM " .. arm_val)
+                                reaper.SetEnvelopeStateChunk(env, chunk, false)
+                                response.ok = true
+                            end
+                        end
+
+                    -- Track Peak
+                    elseif fname == "Track_GetPeakInfo" then
+                        local track = get_track(args[1])
+                        if not track then
+                            response.ok = false
+                            response.error = "Track not found"
+                        else
+                            local peak = reaper.Track_GetPeakInfo(track, args[2] or 0)
+                            local peak_db = -150
+                            if peak > 0 then
+                                peak_db = 20 * math.log(peak, 10)
+                            end
+                            response.ok = true
+                            response.ret = peak
+                            response.peak_db = peak_db
+                        end
+
+                    -- FX Presets
+                    elseif fname == "TrackFX_GetPresetList" then
+                        local track = get_track(args[1])
+                        if not track then
+                            response.ok = false
+                            response.error = "Track not found"
+                        else
+                            local presets = {}
+                            local retval, num_presets = reaper.TrackFX_GetPresetIndex(track, args[2])
+                            for i = 0, num_presets - 1 do
+                                reaper.TrackFX_SetPresetByIndex(track, args[2], i)
+                                local _, preset_name = reaper.TrackFX_GetPreset(track, args[2], "")
+                                table.insert(presets, preset_name)
+                            end
+                            -- Restore original preset
+                            if retval >= 0 then
+                                reaper.TrackFX_SetPresetByIndex(track, args[2], retval)
+                            end
+                            response.ok = true
+                            response.presets = presets
+                        end
+
+                    elseif fname == "TrackFX_SavePreset" then
+                        -- No direct API; save via preset mechanism
+                        response.ok = false
+                        response.error = "TrackFX_SavePreset is not supported via the bridge. Save presets manually in REAPER."
+
+                    -- Render
+                    elseif fname == "RenderProject" then
+                        -- args: output_path, start_time (or nil), end_time (or nil), tail_seconds
+                        local output_path = args[1]
+                        local start_time = args[2]
+                        local end_time = args[3]
+                        local tail_seconds = args[4] or 0
+
+                        if not output_path then
+                            response.ok = false
+                            response.error = "output_path is required"
+                        else
+                            -- Split output_path into directory and filename
+                            local dir = output_path:match("(.+)[/\\]")
+                            local filename = output_path:match("[/\\]([^/\\]+)$") or output_path
+
+                            -- Set render output directory and filename pattern
+                            reaper.GetSetProjectInfo_String(0, "RENDER_FILE", dir or "", true)
+                            reaper.GetSetProjectInfo_String(0, "RENDER_PATTERN", filename, true)
+
+                            -- Set render bounds
+                            if start_time and end_time then
+                                -- Custom time range (bounds flag 2 = custom time range)
+                                reaper.GetSetProjectInfo(0, "RENDER_BOUNDSFLAG", 2, true)
+                                reaper.GetSetProjectInfo(0, "RENDER_STARTPOS", start_time, true)
+                                reaper.GetSetProjectInfo(0, "RENDER_ENDPOS", end_time, true)
+                            else
+                                -- Entire project (bounds flag 0)
+                                reaper.GetSetProjectInfo(0, "RENDER_BOUNDSFLAG", 0, true)
+                            end
+
+                            -- Set tail length
+                            if tail_seconds > 0 then
+                                reaper.GetSetProjectInfo(0, "RENDER_TAILFLAG", 1, true)
+                                reaper.GetSetProjectInfo(0, "RENDER_TAILMS", tail_seconds * 1000, true)
+                            else
+                                reaper.GetSetProjectInfo(0, "RENDER_TAILFLAG", 0, true)
+                            end
+
+                            -- Render with auto-close dialog
+                            reaper.Main_OnCommand(42230, 0)
+
+                            response.ok = true
+                            response.output_path = output_path
+                            response.note = "Render triggered. Audio format uses the project's current render format settings. Check Reaper's render dialog (Cmd+Alt+R) to verify format if needed."
+                        end
+
+                    elseif fname == "RenderRegion" then
+                        -- args: region_index, output_path
+                        local region_index = args[1]
+                        local output_path = args[2]
+
+                        if not region_index or not output_path then
+                            response.ok = false
+                            response.error = "region_index and output_path are required"
+                        else
+                            -- Find the region by index
+                            local num_markers, num_regions = reaper.CountProjectMarkers(0)
+                            local region_start = nil
+                            local region_end = nil
+                            local region_name = nil
+
+                            for i = 0, num_markers + num_regions - 1 do
+                                local retval, isrgn, pos, rgnend, name, markrgnidx = reaper.EnumProjectMarkers(i)
+                                if isrgn and markrgnidx == region_index then
+                                    region_start = pos
+                                    region_end = rgnend
+                                    region_name = name
+                                    break
+                                end
+                            end
+
+                            if not region_start then
+                                response.ok = false
+                                response.error = "Region not found at index " .. tostring(region_index)
+                            else
+                                -- Split output_path into directory and filename
+                                local dir = output_path:match("(.+)[/\\]")
+                                local filename = output_path:match("[/\\]([^/\\]+)$") or output_path
+
+                                -- Set render output
+                                reaper.GetSetProjectInfo_String(0, "RENDER_FILE", dir or "", true)
+                                reaper.GetSetProjectInfo_String(0, "RENDER_PATTERN", filename, true)
+
+                                -- Set custom time range to region bounds
+                                reaper.GetSetProjectInfo(0, "RENDER_BOUNDSFLAG", 2, true)
+                                reaper.GetSetProjectInfo(0, "RENDER_STARTPOS", region_start, true)
+                                reaper.GetSetProjectInfo(0, "RENDER_ENDPOS", region_end, true)
+                                reaper.GetSetProjectInfo(0, "RENDER_TAILFLAG", 0, true)
+
+                                -- Render with auto-close
+                                reaper.Main_OnCommand(42230, 0)
+
+                                response.ok = true
+                                response.output_path = output_path
+                                response.region_name = region_name
+                                response.region_start = region_start
+                                response.region_end = region_end
+                            end
+                        end
+
                     else
                         -- Try generic function call
                         if reaper[fname] then
