@@ -41,7 +41,7 @@ def test_connection(host: str = "localhost", port: int = 9000):
         print("   [FAIL] Cannot connect to server")
         print("\n   Make sure:")
         print("   1. REAPER is running")
-        print("   2. reaper_web_server.py is loaded and running in REAPER")
+        print("   2. reaper_web_server.lua is loaded and running in REAPER")
         print(f"   3. Server is listening on {base_url}")
         return False
     except Exception as e:

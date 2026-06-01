@@ -64,7 +64,7 @@ if not status then
   reaper.ShowConsoleMsg("\nTo install LuaSocket:\n")
   reaper.ShowConsoleMsg("1. Download from: https://lunarmodules.github.io/luasocket/\n")
   reaper.ShowConsoleMsg("2. Or use ReaPack to install 'sockmonkey' which includes LuaSocket\n")
-  reaper.ShowConsoleMsg("\nAlternatively, install Python support in REAPER and use reaper_web_server.py\n")
+  reaper.ShowConsoleMsg("\nAlternatively, use the default file-based bridge (reaper_mcp_bridge.lua), which needs no LuaSocket.\n")
   return
 end
 
