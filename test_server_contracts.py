@@ -196,3 +196,48 @@ class TestMIDINotes:
 
         await clear_midi_item(track_index=0, item_index=0)
         mock_reaper_call.assert_called_once_with("ClearMIDIItem", 0, 0)
+
+
+# --- Path confinement (audit finding 6) ---
+
+
+class TestPathConfinement:
+    """_validate_path must block sensitive writes and enforce the optional root."""
+
+    def test_rejects_startup_lua_write(self):
+        import reaper_mcp_server as srv
+
+        result = srv._validate_path("/some/dir/__startup.lua", write=True)
+        assert isinstance(result, dict) and not result["ok"]
+
+    def test_rejects_dotfile_write(self):
+        import reaper_mcp_server as srv
+
+        result = srv._validate_path("~/.bashrc", write=True)
+        assert isinstance(result, dict) and not result["ok"]
+
+    def test_allows_normal_write(self):
+        import reaper_mcp_server as srv
+
+        result = srv._validate_path("/tmp/out.wav", write=True)
+        assert result == "/tmp/out.wav"
+
+    def test_rejects_empty_path(self):
+        import reaper_mcp_server as srv
+
+        result = srv._validate_path("   ", write=True)
+        assert isinstance(result, dict) and not result["ok"]
+
+    def test_confinement_root_blocks_escape(self, tmp_path, monkeypatch):
+        import reaper_mcp_server as srv
+
+        monkeypatch.setattr(srv, "OUTPUT_DIR", str(tmp_path))
+        escape = srv._validate_path("/etc/passwd", write=False)
+        assert isinstance(escape, dict) and not escape["ok"]
+
+    def test_confinement_root_allows_inside(self, tmp_path, monkeypatch):
+        import reaper_mcp_server as srv
+
+        monkeypatch.setattr(srv, "OUTPUT_DIR", str(tmp_path))
+        inside = srv._validate_path(str(tmp_path / "render.wav"), write=True)
+        assert inside == str(tmp_path / "render.wav")

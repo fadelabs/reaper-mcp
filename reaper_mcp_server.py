@@ -93,6 +93,43 @@ FILE_POLL_INTERVAL = 0.02
 # Communication mode: "file" (default), "http", or "auto" (http with file fallback)
 COMM_MODE = os.getenv("REAPER_COMM_MODE", "file").lower()
 
+# Optional path-confinement root. When set, render/open/insert tool paths must
+# resolve inside it. Tool arguments originate from an LLM that may be steered by
+# untrusted content, so paths are treated as untrusted even though the process is
+# no more privileged than the user already driving REAPER.
+OUTPUT_DIR = os.getenv("REAPER_MCP_OUTPUT_DIR")
+
+
+def _validate_path(path: str, *, write: bool):
+    """Validate a filesystem path used by a tool call.
+
+    Returns the realpath-normalized string on success, or an error dict to return
+    to the caller. Writes to sensitive files (__startup.lua, dotfiles) are always
+    rejected because REAPER executes __startup.lua on launch (code-execution path).
+    """
+    if not isinstance(path, str) or not path.strip():
+        return {"ok": False, "error": "Path must be a non-empty string"}
+
+    expanded = os.path.expanduser(path)
+    # realpath is used only for the security checks (defeats `..` and symlink
+    # traversal); the value forwarded to REAPER is the absolute, non-symlink-
+    # resolved path so legitimate targets aren't silently rewritten.
+    real = os.path.realpath(expanded)
+    base = os.path.basename(real)
+
+    if write and (base == "__startup.lua" or base.startswith(".")):
+        return {"ok": False, "error": f"Refusing to write to sensitive path: {base}"}
+
+    if OUTPUT_DIR:
+        root = os.path.realpath(os.path.expanduser(OUTPUT_DIR))
+        if real != root and not real.startswith(root + os.sep):
+            return {
+                "ok": False,
+                "error": "Path escapes REAPER_MCP_OUTPUT_DIR confinement root",
+            }
+
+    return os.path.abspath(expanded)
+
 # Create MCP server
 mcp = FastMCP("twelvetake-reaper-mcp")
 
@@ -1166,7 +1203,10 @@ async def insert_audio_file(track_index: int, file_path: str, position: float) -
     Returns:
         Object with item info.
     """
-    return await reaper_call("InsertAudioFile", track_index, file_path, position)
+    checked = _validate_path(file_path, write=False)
+    if isinstance(checked, dict):
+        return checked
+    return await reaper_call("InsertAudioFile", track_index, checked, position)
 
 
 @mcp.tool()
@@ -1396,7 +1436,10 @@ async def open_project(path: str) -> dict:
     Returns:
         Object with success status.
     """
-    return await reaper_call("Main_openProject", path)
+    checked = _validate_path(path, write=False)
+    if isinstance(checked, dict):
+        return checked
+    return await reaper_call("Main_openProject", checked)
 
 
 @mcp.tool()
@@ -1418,7 +1461,10 @@ async def render_project(
     Returns:
         Object with render status.
     """
-    return await reaper_call("RenderProject", output_path, start_time, end_time, tail_seconds)
+    checked = _validate_path(output_path, write=True)
+    if isinstance(checked, dict):
+        return checked
+    return await reaper_call("RenderProject", checked, start_time, end_time, tail_seconds)
 
 
 @mcp.tool()
@@ -1433,7 +1479,10 @@ async def render_region(region_index: int, output_path: str) -> dict:
     Returns:
         Object with render status.
     """
-    return await reaper_call("RenderRegion", region_index, output_path)
+    checked = _validate_path(output_path, write=True)
+    if isinstance(checked, dict):
+        return checked
+    return await reaper_call("RenderRegion", region_index, checked)
 
 
 # --- MARKERS AND REGIONS ---

@@ -421,6 +421,12 @@ Third-party plugins use their full name as shown in REAPER's FX browser.
 | `REAPER_BRIDGE_DIR` | `%APPDATA%\REAPER\Scripts\mcp_bridge_data` | File bridge directory |
 | `REAPER_HOST` | `localhost` | HTTP bridge host |
 | `REAPER_PORT` | `9000` | HTTP bridge port |
+| `REAPER_MCP_OUTPUT_DIR` | _(unset)_ | Optional confinement root. When set, render/open/insert paths must resolve inside it. |
+
+> **Trust model:** tool arguments may originate from an LLM steered by untrusted
+> content, and render/insert/open can write or read anywhere your user account
+> can. Writes to `__startup.lua` and dotfiles are always rejected; set
+> `REAPER_MCP_OUTPUT_DIR` to confine all tool file paths to a directory you choose.
 
 ## License
 
