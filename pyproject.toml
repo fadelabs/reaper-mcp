@@ -63,7 +63,6 @@ only-include = [
 include = [
     "reaper_mcp_server.py",
     "reaper_mcp_bridge.lua",
-    "reaper_web_server.py",
     "reaper_web_server.lua",
     "README.md",
     "LICENSE",

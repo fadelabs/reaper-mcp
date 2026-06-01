@@ -115,15 +115,14 @@ MCP Server                    REAPER Bridge
 ### HTTP Mode (Advanced)
 
 Uses HTTP requests on localhost. Requires additional setup:
-- **Lua HTTP bridge**: Requires LuaSocket (install via ReaPack → "sockmonkey")
-- **Python HTTP bridge**: Requires Python enabled in REAPER preferences
+- **Lua HTTP bridge** (`reaper_web_server.lua`): Requires LuaSocket (install via ReaPack → "sockmonkey")
 
 ```bash
 # Set environment variable to use HTTP mode
 REAPER_COMM_MODE=http python reaper_mcp_server.py
 ```
 
-**Default port:** 9000
+**Default port:** 9000 (loopback only)
 
 ## Quick Start Examples
 
