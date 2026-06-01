@@ -20,6 +20,7 @@ import sys
 import asyncio
 import json
 import time
+import uuid
 from pathlib import Path
 from mcp.server.fastmcp import FastMCP
 
@@ -95,9 +96,6 @@ COMM_MODE = os.getenv("REAPER_COMM_MODE", "file").lower()
 # Create MCP server
 mcp = FastMCP("twelvetake-reaper-mcp")
 
-# Request counter for file-based fallback
-request_counter = 0
-
 # Async HTTP client (reused for connection pooling)
 _http_client = None
 
@@ -141,14 +139,19 @@ async def reaper_call_http(func: str, args: list) -> dict:
 
 async def reaper_call_file(func: str, args: list) -> dict:
     """Call a REAPER function via file-based bridge."""
-    global request_counter
-    request_counter = (request_counter % 999) + 1
-
-    # Ensure bridge directory exists
+    # Ensure bridge dir exists and is private to the current user (0700) so other
+    # local accounts cannot read request/response JSON or drop spoofed requests.
     BRIDGE_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        BRIDGE_DIR.chmod(0o700)
+    except OSError:
+        pass
 
-    request_file = BRIDGE_DIR / f"request_{request_counter}.json"
-    response_file = BRIDGE_DIR / f"response_{request_counter}.json"
+    # Unpredictable per-request id: defeats request-file spoofing and avoids the
+    # old wrapping 1..999 counter that could collide responses under concurrency.
+    req_id = uuid.uuid4().hex
+    request_file = BRIDGE_DIR / f"request_{req_id}.json"
+    response_file = BRIDGE_DIR / f"response_{req_id}.json"
 
     request_data = {"func": func, "args": args}
 
@@ -159,9 +162,13 @@ async def reaper_call_file(func: str, args: list) -> dict:
         except OSError:
             pass
 
-        # Write request atomically (temp file + rename)
+        # Write request atomically (temp file + rename), 0600 before publish.
         tmp_file = request_file.with_suffix('.tmp')
         tmp_file.write_text(json.dumps(request_data))
+        try:
+            tmp_file.chmod(0o600)
+        except OSError:
+            pass
         tmp_file.rename(request_file)
 
         # Wait for response

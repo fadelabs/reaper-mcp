@@ -1417,18 +1417,29 @@ end
 
 -- Main processing function
 local function process_request()
-    -- Look for any request files with numbered pattern
-    for i = 1, 1000 do
-        local numbered_request_file = bridge_dir .. 'request_' .. i .. '.json'
-        local numbered_response_file = bridge_dir .. 'response_' .. i .. '.json'
-        
+    -- Enumerate pending request files up front (unpredictable ids), so deleting
+    -- one mid-loop cannot disturb the EnumerateFiles cursor.
+    local req_ids = {}
+    local eidx = 0
+    while true do
+        local entry = reaper.EnumerateFiles(bridge_dir, eidx)
+        if not entry then break end
+        local rid = entry:match('^request_(.+)%.json$')
+        if rid then req_ids[#req_ids + 1] = rid end
+        eidx = eidx + 1
+    end
+
+    for _, req_id in ipairs(req_ids) do
+        local numbered_request_file = bridge_dir .. 'request_' .. req_id .. '.json'
+        local numbered_response_file = bridge_dir .. 'response_' .. req_id .. '.json'
+
         if file_exists(numbered_request_file) then
             -- Wrap in pcall to catch any errors
             local ok, err = pcall(function()
                 -- Read and process request
                 local request_data = read_file(numbered_request_file)
                 if request_data then
-                    reaper.ShowConsoleMsg("Processing request " .. i .. ": " .. request_data .. "\n")
+                    reaper.ShowConsoleMsg("Processing request " .. req_id .. ": " .. request_data .. "\n")
                     
                     -- Parse the request
                     local request = decode_json(request_data)
@@ -5541,7 +5552,7 @@ local function process_request()
                     
                     -- Write response
                     local response_json = encode_json(response)
-                    reaper.ShowConsoleMsg("Sending response " .. i .. ": " .. response_json .. "\n")
+                    reaper.ShowConsoleMsg("Sending response " .. req_id .. ": " .. response_json .. "\n")
                     write_file(numbered_response_file, response_json)
                 end
             end
@@ -5549,7 +5560,7 @@ local function process_request()
             
             if not ok then
                 -- Error occurred, write error response
-                reaper.ShowConsoleMsg("ERROR processing request " .. i .. ": " .. tostring(err) .. "\n")
+                reaper.ShowConsoleMsg("ERROR processing request " .. req_id .. ": " .. tostring(err) .. "\n")
                 local error_response = {ok = false, error = "Bridge error: " .. tostring(err)}
                 write_file(numbered_response_file, encode_json(error_response))
             end
