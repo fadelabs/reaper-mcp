@@ -5531,18 +5531,12 @@ local function process_request()
                         end
 
                     else
-                        -- Try generic function call
-                        if reaper[fname] then
-                            local ok, result = pcall(reaper[fname], table.unpack(args))
-                            if ok then
-                                response.ok = true
-                                response.ret = result
-                            else
-                                response.error = "Error calling " .. fname .. ": " .. tostring(result)
-                            end
-                        else
-                            response.error = "Unknown function: " .. fname
-                        end
+                        -- Strict allowlist: no generic reaper[fname] fallback.
+                        -- Every supported tool is handled by DSL_FUNCTIONS or an
+                        -- explicit branch above; anything else is rejected so a
+                        -- spoofed request file cannot reach arbitrary reaper.* APIs.
+                        response.ok = false
+                        response.error = "Unknown function: " .. fname
                     end
                     
                     -- Write response
