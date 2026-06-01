@@ -117,9 +117,14 @@ MCP Server                    REAPER Bridge
 Uses HTTP requests on localhost. Requires additional setup:
 - **Lua HTTP bridge** (`reaper_web_server.lua`): Requires LuaSocket (install via ReaPack → "sockmonkey")
 
+The HTTP bridge is loopback-only and requires a bearer token. On startup it
+prints a `REAPER_BRIDGE_TOKEN=...` line to the REAPER console; set that value in
+the MCP server's environment. To keep a stable token across restarts, set
+`REAPER_BRIDGE_TOKEN` before launching the bridge so both sides share it.
+
 ```bash
-# Set environment variable to use HTTP mode
-REAPER_COMM_MODE=http python reaper_mcp_server.py
+# Set environment variables to use HTTP mode
+REAPER_COMM_MODE=http REAPER_BRIDGE_TOKEN=<token-from-reaper-console> python reaper_mcp_server.py
 ```
 
 **Default port:** 9000 (loopback only)
@@ -421,6 +426,7 @@ Third-party plugins use their full name as shown in REAPER's FX browser.
 | `REAPER_BRIDGE_DIR` | `%APPDATA%\REAPER\Scripts\mcp_bridge_data` | File bridge directory |
 | `REAPER_HOST` | `localhost` | HTTP bridge host |
 | `REAPER_PORT` | `9000` | HTTP bridge port |
+| `REAPER_BRIDGE_TOKEN` | _(generated)_ | Bearer token for HTTP mode. Printed to the REAPER console on bridge startup; set it for the MCP server (or set it for both sides to pin it). |
 | `REAPER_MCP_OUTPUT_DIR` | _(unset)_ | Optional confinement root. When set, render/open/insert paths must resolve inside it. |
 
 > **Trust model:** tool arguments may originate from an LLM steered by untrusted

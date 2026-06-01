@@ -241,3 +241,59 @@ class TestPathConfinement:
         monkeypatch.setattr(srv, "OUTPUT_DIR", str(tmp_path))
         inside = srv._validate_path(str(tmp_path / "render.wav"), write=True)
         assert inside == str(tmp_path / "render.wav")
+
+
+# --- HTTP bridge auth (audit finding 2) ---
+
+
+class TestHttpAuth:
+    """reaper_call_http must present the bearer token when configured."""
+
+    @pytest.mark.asyncio
+    async def test_http_sends_bearer_token(self, monkeypatch):
+        import reaper_mcp_server as srv
+
+        monkeypatch.setattr(srv, "BRIDGE_TOKEN", "secret123")
+        monkeypatch.setattr(srv, "HTTPX_AVAILABLE", True)
+
+        captured = {}
+
+        class FakeResp:
+            status_code = 200
+
+            def json(self):
+                return {"ok": True}
+
+        class FakeClient:
+            async def post(self, url, json=None, headers=None, timeout=None):
+                captured["headers"] = headers or {}
+                return FakeResp()
+
+        monkeypatch.setattr(srv, "get_http_client", lambda: FakeClient())
+
+        result = await srv.reaper_call_http("CountTracks", [0])
+        assert captured["headers"].get("Authorization") == "Bearer secret123"
+        assert result == {"ok": True}
+
+    @pytest.mark.asyncio
+    async def test_http_401_surfaces_token_error(self, monkeypatch):
+        import reaper_mcp_server as srv
+
+        monkeypatch.setattr(srv, "BRIDGE_TOKEN", "wrong")
+        monkeypatch.setattr(srv, "HTTPX_AVAILABLE", True)
+
+        class FakeResp:
+            status_code = 401
+
+            def json(self):
+                return {}
+
+        class FakeClient:
+            async def post(self, url, json=None, headers=None, timeout=None):
+                return FakeResp()
+
+        monkeypatch.setattr(srv, "get_http_client", lambda: FakeClient())
+
+        result = await srv.reaper_call_http("CountTracks", [0])
+        assert not result["ok"]
+        assert "REAPER_BRIDGE_TOKEN" in result["error"]

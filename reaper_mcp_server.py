@@ -93,6 +93,11 @@ FILE_POLL_INTERVAL = 0.02
 # Communication mode: "file" (default), "http", or "auto" (http with file fallback)
 COMM_MODE = os.getenv("REAPER_COMM_MODE", "file").lower()
 
+# Shared secret for the HTTP bridge. The Lua HTTP server prints a
+# REAPER_BRIDGE_TOKEN value to the REAPER console on startup (or pin one by
+# setting this var for both sides). Required for HTTP mode; unused in file mode.
+BRIDGE_TOKEN = os.getenv("REAPER_BRIDGE_TOKEN", "")
+
 # Optional path-confinement root. When set, render/open/insert tool paths must
 # resolve inside it. Tool arguments originate from an LLM that may be steered by
 # untrusted content, so paths are treated as untrusted even though the process is
@@ -156,14 +161,26 @@ async def reaper_call_http(func: str, args: list) -> dict:
     if client is None:
         return {"ok": False, "error": "HTTP client not available", "fallback": True}
 
+    headers = {}
+    if BRIDGE_TOKEN:
+        headers["Authorization"] = f"Bearer {BRIDGE_TOKEN}"
+
     try:
         response = await client.post(
             f"{REAPER_URL}/call",
             json={"func": func, "args": args},
+            headers=headers,
             timeout=5.0
         )
         if response.status_code == 200:
             return response.json()
+        elif response.status_code == 401:
+            return {
+                "ok": False,
+                "error": "HTTP bridge rejected the token. Set REAPER_BRIDGE_TOKEN "
+                         "to the value printed in the REAPER console.",
+                "fallback": True,
+            }
         else:
             return {"ok": False, "error": f"HTTP {response.status_code}", "fallback": True}
     except httpx.ConnectError:

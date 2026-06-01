@@ -14,6 +14,44 @@
 
 local HOST = "127.0.0.1"
 local PORT = 9000
+local MAX_BODY = 1024 * 1024  -- 1 MiB request-body cap (memory-DoS guard)
+
+-- Bearer token shared with the MCP server. Prefer REAPER_BRIDGE_TOKEN from the
+-- environment (set the same value for both sides); otherwise generate one and
+-- print it so it can be copied into the MCP server's environment. The listener
+-- is loopback-only, so this is a defense-in-depth shared secret against other
+-- local processes / the browser cross-origin vector.
+local function generate_token()
+  math.randomseed(os.time() + math.floor((reaper.time_precise() or 0) * 1000000) % 2147483647)
+  local chars = "0123456789abcdef"
+  local t = {}
+  for i = 1, 48 do
+    local n = math.random(1, #chars)
+    t[i] = chars:sub(n, n)
+  end
+  return table.concat(t)
+end
+
+local AUTH_TOKEN = os.getenv("REAPER_BRIDGE_TOKEN")
+local AUTH_TOKEN_GENERATED = false
+if not AUTH_TOKEN or AUTH_TOKEN == "" then
+  AUTH_TOKEN = generate_token()
+  AUTH_TOKEN_GENERATED = true
+end
+
+-- True for requests that may proceed without a token: CORS preflight and the
+-- read-only health check. Everything else must present the bearer token.
+local function request_is_authorized(request)
+  local h = request.headers or {}
+  local provided = h["authorization"]
+  if provided then
+    provided = provided:gsub("^[Bb]earer%s+", "")
+  end
+  if not provided or provided == "" then
+    provided = h["x-bridge-token"]
+  end
+  return provided == AUTH_TOKEN
+end
 
 local socket = nil
 local client = nil
@@ -263,7 +301,7 @@ local function send_response(client_socket, status_code, status_text, body)
     "Content-Type: application/json\r\n" ..
     "Access-Control-Allow-Origin: http://localhost\r\n" ..
     "Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS\r\n" ..
-    "Access-Control-Allow-Headers: Content-Type\r\n" ..
+    "Access-Control-Allow-Headers: Content-Type, Authorization\r\n" ..
     "Content-Length: %d\r\n" ..
     "Connection: close\r\n" ..
     "\r\n%s",
@@ -277,7 +315,9 @@ local function send_json(client_socket, data, status_code)
   local status_text = status_code == 200 and "OK" or
                       status_code == 201 and "Created" or
                       status_code == 400 and "Bad Request" or
-                      status_code == 404 and "Not Found" or "Error"
+                      status_code == 401 and "Unauthorized" or
+                      status_code == 404 and "Not Found" or
+                      status_code == 413 and "Payload Too Large" or "Error"
   send_response(client_socket, status_code, status_text, json_encode(data))
 end
 
@@ -1304,6 +1344,16 @@ local function handle_request(request_text, client_socket)
     return
   end
 
+  -- Require the bearer token for everything except the CORS preflight and the
+  -- read-only health check.
+  local is_ping = (request.method == "GET" and request.path == "/ping")
+  if request.method ~= "OPTIONS" and not is_ping then
+    if not request_is_authorized(request) then
+      send_error(client_socket, "Unauthorized", 401)
+      return
+    end
+  end
+
   if request.method == "OPTIONS" then
     handle_options(client_socket)
   elseif request.method == "GET" then
@@ -1344,10 +1394,14 @@ local function process_requests()
     until not line or line == ""
 
     -- Read body if Content-Length header present
+    local too_large = false
     local content_length = request_text:match("[Cc]ontent%-[Ll]ength:%s*(%d+)")
     if content_length then
       content_length = tonumber(content_length)
-      if content_length > 0 then
+      if content_length and content_length > MAX_BODY then
+        send_error(client, "Request body too large", 413)
+        too_large = true
+      elseif content_length and content_length > 0 then
         local body, err = client:receive(content_length)
         if body then
           request_text = request_text .. body
@@ -1355,7 +1409,7 @@ local function process_requests()
       end
     end
 
-    if #request_text > 0 then
+    if not too_large and #request_text > 0 then
       handle_request(request_text, client)
     end
 
@@ -1387,7 +1441,17 @@ local function start_server()
 
   reaper.ShowConsoleMsg("===========================================\n")
   reaper.ShowConsoleMsg("REAPER Web Server started!\n")
-  reaper.ShowConsoleMsg("URL: http://" .. HOST .. ":" .. PORT .. "\n")
+  reaper.ShowConsoleMsg("URL: http://" .. HOST .. ":" .. PORT .. " (loopback only)\n")
+  reaper.ShowConsoleMsg("===========================================\n")
+  if AUTH_TOKEN_GENERATED then
+    reaper.ShowConsoleMsg("\nAuth token (generated this session):\n")
+    reaper.ShowConsoleMsg("  REAPER_BRIDGE_TOKEN=" .. AUTH_TOKEN .. "\n")
+    reaper.ShowConsoleMsg("Set that in the MCP server's environment. To keep a\n")
+    reaper.ShowConsoleMsg("stable token across restarts, set REAPER_BRIDGE_TOKEN\n")
+    reaper.ShowConsoleMsg("before launching this bridge instead.\n")
+  else
+    reaper.ShowConsoleMsg("\nAuth token: loaded from REAPER_BRIDGE_TOKEN env.\n")
+  end
   reaper.ShowConsoleMsg("===========================================\n")
   reaper.ShowConsoleMsg("\nEndpoints:\n")
   reaper.ShowConsoleMsg("  GET  /ping - Health check\n")
