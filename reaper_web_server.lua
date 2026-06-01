@@ -99,8 +99,16 @@ local function json_encode(obj)
   return "null"
 end
 
-local function json_decode(str)
+-- Guards against adversarial input (deeply nested / oversized) on the hand-rolled
+-- recursive decoder, which runs in-process inside REAPER.
+local JSON_MAX_DEPTH = 64
+local JSON_MAX_LEN = 1024 * 1024  -- 1 MiB per decoded value
+
+local function json_decode(str, depth)
   if not str or str == "" then return nil end
+  depth = depth or 0
+  if depth > JSON_MAX_DEPTH then return nil end
+  if #str > JSON_MAX_LEN then return nil end
 
   str = str:gsub("^%s*(.-)%s*$", "%1")
 
@@ -138,7 +146,7 @@ local function json_decode(str)
           depth = depth - 1
         elseif char == ',' and depth == 0 then
           local value = content:sub(start, pos - 1)
-          arr[i] = json_decode(value:match("^%s*(.-)%s*$"))
+          arr[i] = json_decode(value:match("^%s*(.-)%s*$"), depth + 1)
           i = i + 1
           start = pos + 1
         end
@@ -148,7 +156,7 @@ local function json_decode(str)
 
     if start <= #content then
       local value = content:sub(start)
-      arr[i] = json_decode(value:match("^%s*(.-)%s*$"))
+      arr[i] = json_decode(value:match("^%s*(.-)%s*$"), depth + 1)
     end
     return arr
   elseif str:match("^{.*}$") then
@@ -197,7 +205,7 @@ local function json_decode(str)
       end
 
       local value = content:sub(value_start, value_end - 1)
-      obj[key] = json_decode(value:match("^%s*(.-)%s*$"))
+      obj[key] = json_decode(value:match("^%s*(.-)%s*$"), depth + 1)
 
       pos = value_end + 1
     end

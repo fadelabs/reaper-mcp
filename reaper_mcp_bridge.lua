@@ -46,10 +46,19 @@ local function encode_json(v)
     end
 end
 
+-- Guards against adversarial input (deeply nested / oversized) on the hand-rolled
+-- recursive decoder. The bridge hosts in-process, so a runaway parse risks the
+-- whole REAPER session.
+local JSON_MAX_DEPTH = 64
+local JSON_MAX_LEN = 1024 * 1024  -- 1 MiB per decoded value
+
 -- Better JSON decoding that handles arrays properly
-local function decode_json(str)
+local function decode_json(str, depth)
     if not str or str == "" then return nil end
-    
+    depth = depth or 0
+    if depth > JSON_MAX_DEPTH then return nil end
+    if #str > JSON_MAX_LEN then return nil end
+
     -- Remove whitespace
     str = str:gsub("^%s*(.-)%s*$", "%1")
     
@@ -83,7 +92,7 @@ local function decode_json(str)
                 elseif char == ',' and depth == 0 then
                     -- Found a top-level comma
                     local value = content:sub(start, pos - 1)
-                    arr[i] = decode_json(value:match("^%s*(.-)%s*$"))
+                    arr[i] = decode_json(value:match("^%s*(.-)%s*$"), depth + 1)
                     i = i + 1
                     start = pos + 1
                 end
@@ -93,7 +102,7 @@ local function decode_json(str)
             -- Don't forget the last element
             if start <= #content then
                 local value = content:sub(start)
-                arr[i] = decode_json(value:match("^%s*(.-)%s*$"))
+                arr[i] = decode_json(value:match("^%s*(.-)%s*$"), depth + 1)
             end
         end
         return arr
@@ -150,7 +159,7 @@ local function decode_json(str)
             end
             
             local value = content:sub(value_start, value_end - 1)
-            obj[key] = decode_json(value:match("^%s*(.-)%s*$"))
+            obj[key] = decode_json(value:match("^%s*(.-)%s*$"), depth + 1)
             
             pos = value_end + 1
         end
