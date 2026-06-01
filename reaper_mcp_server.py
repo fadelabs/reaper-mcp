@@ -19,6 +19,7 @@ import os
 import sys
 import asyncio
 import json
+import math
 import time
 import uuid
 from pathlib import Path
@@ -35,8 +36,6 @@ def db_to_linear(db: float) -> float:
     """Convert decibels to linear amplitude."""
     return 10 ** (db / 20) if db > -150 else 0
 
-
-import math
 
 _REAEQ_BAND_SIZE = 5
 _REAEQ_TYPE_MAP = {
@@ -2603,7 +2602,7 @@ async def batch_apply_eq(track_indices: list[int], bands: list) -> dict:
             failures.append({"track": track_idx, "error": "Failed to add ReaEQ"})
             continue
 
-        set_result = await reaper_call("BatchSetFXParams", track_idx, eq_idx, params)
+        await reaper_call("BatchSetFXParams", track_idx, eq_idx, params)
         track_results.append({"track": track_idx, "eq_fx_index": eq_idx})
 
     result = {

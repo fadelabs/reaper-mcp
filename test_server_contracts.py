@@ -4,9 +4,7 @@ Verifies that server tool functions pass correct parameters to reaper_call.
 Does NOT test Lua bridge (requires running Reaper) — tests the Python side only.
 """
 
-import asyncio
-import json
-from unittest.mock import AsyncMock, patch, MagicMock
+from unittest.mock import AsyncMock, patch
 
 import pytest
 

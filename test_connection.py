@@ -11,7 +11,6 @@ Default: localhost:9000
 """
 
 import sys
-import json
 
 try:
     import httpx
@@ -40,9 +39,9 @@ def test_connection(host: str = "localhost", port: int = 9000):
             return False
     except httpx.ConnectError:
         print("   [FAIL] Cannot connect to server")
-        print(f"\n   Make sure:")
-        print(f"   1. REAPER is running")
-        print(f"   2. reaper_web_server.py is loaded and running in REAPER")
+        print("\n   Make sure:")
+        print("   1. REAPER is running")
+        print("   2. reaper_web_server.py is loaded and running in REAPER")
         print(f"   3. Server is listening on {base_url}")
         return False
     except Exception as e:

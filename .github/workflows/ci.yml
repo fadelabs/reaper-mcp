@@ -1,0 +1,37 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  lint-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Ruff lint
+        run: uvx ruff check reaper_mcp_server.py test_server_contracts.py test_connection.py
+
+      - name: Offline contract tests
+        run: >
+          uv run --with mcp --with httpx --with pytest --with pytest-asyncio
+          python -m pytest test_server_contracts.py -q
+
+      - name: pip-audit (resolved dependency tree)
+        run: uv run --with mcp --with httpx --with pip-audit pip-audit
+
+  security-guard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Security regression guard
+        run: bash scripts/security_guard.sh

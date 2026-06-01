@@ -54,6 +54,17 @@ Funding = "https://buymeacoffee.com/twelvetake"
 [project.scripts]
 twelvetake-reaper-mcp = "reaper_mcp_server:main"
 
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.6",
+    "pip-audit>=2.7",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+
 [tool.hatch.build.targets.wheel]
 only-include = [
     "reaper_mcp_server.py",
