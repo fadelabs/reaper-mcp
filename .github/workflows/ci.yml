@@ -18,7 +18,11 @@ jobs:
         uses: astral-sh/setup-uv@v5
 
       - name: Ruff lint
-        run: uvx ruff check reaper_mcp_server.py test_server_contracts.py test_connection.py
+        # Pinned: bare `uvx ruff` floats to the newest release, and a new minor
+        # can widen the default rule set. This repo ships no [tool.ruff] config,
+        # so it relies on those defaults -- an unpinned ruff turns an unrelated
+        # upstream release into a red build on unchanged code.
+        run: uvx ruff@0.15.12 check reaper_mcp_server.py test_server_contracts.py test_connection.py
 
       - name: Offline contract tests
         run: >
