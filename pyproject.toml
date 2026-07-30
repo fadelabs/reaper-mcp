@@ -41,7 +41,11 @@ classifiers = [
     "Topic :: Software Development :: Libraries :: Python Modules",
 ]
 dependencies = [
-    "mcp>=1.0.0",
+    # Capped below 2.0: this server imports `mcp.server.fastmcp`, which the 2.x
+    # line removed. An unbounded `mcp>=1.0.0` lets a routine `uv lock --upgrade`
+    # pull 2.x and break the server at import time. Floor is 1.28.1 for
+    # PYSEC-2026-3483.
+    "mcp>=1.28.1,<2",
     "httpx>=0.25.0",
 ]
 

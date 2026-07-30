@@ -1,7 +1,8 @@
 # REAPER MCP Server Dependencies
 
 # MCP protocol implementation
-mcp>=1.0.0
+# Capped below 2.0 -- 2.x removed `mcp.server.fastmcp`, which this server imports.
+mcp>=1.28.1,<2
 
 # Async HTTP client for communicating with REAPER
 httpx>=0.25.0
