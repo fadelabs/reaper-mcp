@@ -57,14 +57,29 @@ local socket = nil
 local client = nil
 local server_running = false
 
--- Try to load LuaSocket
+-- Try to load LuaSocket.
+--
+-- A stock LuaSocket build cannot be used here, even built for the right Lua
+-- version and architecture and placed on REAPER's package.cpath. Upstream links
+-- socket/core.so with `-undefined dynamic_lookup`, so the module resolves Lua's
+-- C symbols from the host process at load time. The standalone `lua` binary
+-- exports them; REAPER links Lua statically and exports nothing, so dlopen
+-- fails with "symbol not found in flat namespace '_luaL_addlstring'". Only a
+-- build targeting REAPER (ReaPack's sockmonkey) resolves correctly.
 local status, socket_lib = pcall(require, "socket")
 if not status then
-  reaper.ShowConsoleMsg("ERROR: LuaSocket not found.\n")
-  reaper.ShowConsoleMsg("\nTo install LuaSocket:\n")
-  reaper.ShowConsoleMsg("1. Download from: https://lunarmodules.github.io/luasocket/\n")
-  reaper.ShowConsoleMsg("2. Or use ReaPack to install 'sockmonkey' which includes LuaSocket\n")
-  reaper.ShowConsoleMsg("\nAlternatively, use the default file-based bridge (reaper_mcp_bridge.lua), which needs no LuaSocket.\n")
+  reaper.ShowConsoleMsg("ERROR: LuaSocket not available to REAPER.\n")
+  reaper.ShowConsoleMsg("Reason: " .. tostring(socket_lib) .. "\n")
+  reaper.ShowConsoleMsg("\nInstall it with ReaPack:\n")
+  reaper.ShowConsoleMsg("  Extensions > ReaPack > Browse packages > install 'sockmonkey'\n")
+  reaper.ShowConsoleMsg("  (ReaPack itself: https://reapack.com)\n")
+  reaper.ShowConsoleMsg("\nNote: downloading LuaSocket from lunarmodules.github.io and building it\n")
+  reaper.ShowConsoleMsg("yourself will NOT work in REAPER. Such builds expect the host process to\n")
+  reaper.ShowConsoleMsg("export Lua's C symbols; REAPER links Lua statically and does not, so the\n")
+  reaper.ShowConsoleMsg("module fails to load with a 'symbol not found in flat namespace' error\n")
+  reaper.ShowConsoleMsg("even when placed correctly on package.cpath.\n")
+  reaper.ShowConsoleMsg("\nAlternatively, use the default file-based bridge (reaper_mcp_bridge.lua),\n")
+  reaper.ShowConsoleMsg("which needs no LuaSocket and is the recommended transport.\n")
   return
 end
 
