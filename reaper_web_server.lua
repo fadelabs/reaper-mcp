@@ -59,27 +59,44 @@ local server_running = false
 
 -- Try to load LuaSocket.
 --
--- A stock LuaSocket build cannot be used here, even built for the right Lua
--- version and architecture and placed on REAPER's package.cpath. Upstream links
--- socket/core.so with `-undefined dynamic_lookup`, so the module resolves Lua's
--- C symbols from the host process at load time. The standalone `lua` binary
--- exports them; REAPER links Lua statically and exports nothing, so dlopen
--- fails with "symbol not found in flat namespace '_luaL_addlstring'". Only a
--- build targeting REAPER (ReaPack's sockmonkey) resolves correctly.
+-- No known way to load LuaSocket into REAPER currently works. Both documented
+-- routes were tested on macOS (REAPER arm64, embedded Lua 5.4) and both fail:
+--
+--   1. A stock build (lunarmodules.github.io, luarocks) links socket/core.so
+--      with `-undefined dynamic_lookup`, resolving Lua's C symbols from the host
+--      process at load time. The standalone `lua` binary exports them; REAPER
+--      links Lua statically and exports nothing. dlopen fails outright with
+--      "symbol not found in flat namespace '_luaL_addlstring'", even with the
+--      right Lua version and architecture and the module on REAPER's cpath.
+--
+--   2. Statically linking liblua into core.so resolves those symbols and does
+--      load -- but it puts a second Lua runtime in the process. Strings created
+--      by REAPER's Lua are then misread by the embedded copy: short strings
+--      survive (a 30-byte send returns 30) while long strings read as
+--      zero-length (a 300-byte send returns 0, silently dropping the data).
+--      Every real HTTP response exceeds Lua's 40-byte short-string limit, so
+--      responses vanish with no error. Worse than not loading at all.
+--
+-- A working build would have to share REAPER's own Lua runtime. No such
+-- distribution is known: the "sockmonkey" package previously named here does
+-- not exist. sockmonkey72 (github.com/jeremybernstein/ReaScripts) is a script
+-- author whose repository ships no LuaSocket -- its extensions are
+-- automidireset, childwindow and onprojectload.
+--
+-- Until such a build exists, this HTTP transport cannot run inside REAPER.
+-- Use the file bridge (reaper_mcp_bridge.lua), which needs no native module.
 local status, socket_lib = pcall(require, "socket")
 if not status then
   reaper.ShowConsoleMsg("ERROR: LuaSocket not available to REAPER.\n")
   reaper.ShowConsoleMsg("Reason: " .. tostring(socket_lib) .. "\n")
-  reaper.ShowConsoleMsg("\nInstall it with ReaPack:\n")
-  reaper.ShowConsoleMsg("  Extensions > ReaPack > Browse packages > install 'sockmonkey'\n")
-  reaper.ShowConsoleMsg("  (ReaPack itself: https://reapack.com)\n")
-  reaper.ShowConsoleMsg("\nNote: downloading LuaSocket from lunarmodules.github.io and building it\n")
-  reaper.ShowConsoleMsg("yourself will NOT work in REAPER. Such builds expect the host process to\n")
-  reaper.ShowConsoleMsg("export Lua's C symbols; REAPER links Lua statically and does not, so the\n")
-  reaper.ShowConsoleMsg("module fails to load with a 'symbol not found in flat namespace' error\n")
-  reaper.ShowConsoleMsg("even when placed correctly on package.cpath.\n")
-  reaper.ShowConsoleMsg("\nAlternatively, use the default file-based bridge (reaper_mcp_bridge.lua),\n")
-  reaper.ShowConsoleMsg("which needs no LuaSocket and is the recommended transport.\n")
+  reaper.ShowConsoleMsg("\nUse the file-based bridge instead (reaper_mcp_bridge.lua).\n")
+  reaper.ShowConsoleMsg("It needs no native module and is the default transport\n")
+  reaper.ShowConsoleMsg("used by the MCP server (REAPER_COMM_MODE=file).\n")
+  reaper.ShowConsoleMsg("\nWhy not just install LuaSocket: there is currently no build\n")
+  reaper.ShowConsoleMsg("that works inside REAPER. Stock builds cannot load at all\n")
+  reaper.ShowConsoleMsg("(REAPER does not export Lua's C symbols), and statically\n")
+  reaper.ShowConsoleMsg("linked builds load but silently drop any response longer\n")
+  reaper.ShowConsoleMsg("than 40 bytes. See the comment above this message.\n")
   return
 end
 
