@@ -2,7 +2,8 @@
 """Generate reaper_lua_shim.h from the symbol list probed out of LuaSocket."""
 import sys
 
-syms = [s.strip() for s in open(sys.argv[1]) if s.strip()]
+with open(sys.argv[1]) as f:
+    syms = [s.strip() for s in f if s.strip()]
 # lua_settable is dead-stripped from REAPER; it is emulated, not resolved.
 syms = [s for s in syms if s != "lua_settable"]
 # Needed by the shim itself for the ABI guard, not by LuaSocket.
@@ -93,5 +94,6 @@ for s in syms:
 out.append("#define %-*s reaper_shim_lua_settable\n" % (width, "lua_settable"))
 out.append(TAIL_END)
 
-open(sys.argv[2], "w").write("".join(out))
+with open(sys.argv[2], "w") as f:
+    f.write("".join(out))
 print("wrote %s with %d resolved symbols + lua_settable emulation" % (sys.argv[2], len(syms)))
