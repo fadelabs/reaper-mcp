@@ -47,6 +47,9 @@ dependencies = [
     # PYSEC-2026-3483.
     "mcp>=1.28.1,<2",
     "httpx>=0.25.0",
+    # Transitive, via mcp -> PyJWT. Floored for PYSEC-2026-3552; nothing in the
+    # direct tree constrains it, so the resolver otherwise picks 49.0.0.
+    "cryptography>=50.0.0",
 ]
 
 [project.urls]
