@@ -115,7 +115,13 @@ MCP Server                    REAPER Bridge
 ### HTTP Mode (Advanced)
 
 Uses HTTP requests on localhost. Requires additional setup:
-- **Lua HTTP bridge** (`reaper_web_server.lua`): Requires LuaSocket (install via ReaPack → "sockmonkey")
+- **Lua HTTP bridge** (`reaper_web_server.lua`): requires LuaSocket built for
+  REAPER. Stock LuaSocket cannot work here — REAPER links Lua statically and
+  does not export its C symbols, so a stock module will not open, and one with
+  `liblua` linked in opens but silently drops any response over 40 bytes.
+  Build the working one with [`luasocket-shim/build.sh`](luasocket-shim/)
+  (macOS), then relaunch REAPER. There is no ReaPack package for this; the
+  "sockmonkey" package named in older docs does not exist.
 
 The HTTP bridge is loopback-only and requires a bearer token. On startup it
 prints a `REAPER_BRIDGE_TOKEN=...` line to the REAPER console; set that value in
@@ -411,7 +417,10 @@ Third-party plugins use their full name as shown in REAPER's FX browser.
 - Check track count with `get_track_count()`
 
 ### Bridge script won't load
-- **Lua:** Ensure LuaSocket is installed (ReaPack → "sockmonkey")
+- **Lua (HTTP mode):** build LuaSocket with
+  [`luasocket-shim/build.sh`](luasocket-shim/) and relaunch REAPER. Stock
+  LuaSocket will not work, and no ReaPack package provides a working one. The
+  file bridge needs no native module at all.
 - **Python:** Enable Python in REAPER preferences
 
 ### Slow response

@@ -59,44 +59,63 @@ local server_running = false
 
 -- Try to load LuaSocket.
 --
--- No known way to load LuaSocket into REAPER currently works. Both documented
--- routes were tested on macOS (REAPER arm64, embedded Lua 5.4) and both fail:
+-- Stock LuaSocket builds cannot run inside REAPER. Two routes were tested on
+-- macOS (REAPER arm64, embedded Lua 5.4) and both fail:
 --
 --   1. A stock build (lunarmodules.github.io, luarocks) links socket/core.so
---      with `-undefined dynamic_lookup`, resolving Lua's C symbols from the host
---      process at load time. The standalone `lua` binary exports them; REAPER
---      links Lua statically and exports nothing. dlopen fails outright with
---      "symbol not found in flat namespace '_luaL_addlstring'", even with the
---      right Lua version and architecture and the module on REAPER's cpath.
+--      expecting the host process to export Lua's C symbols. The standalone
+--      `lua` binary does; REAPER links Lua statically and exports nothing, so
+--      the module never opens -- "symbol not found in flat namespace
+--      '_luaL_addlstring'" -- even with the right Lua version and architecture
+--      and the module on REAPER's cpath.
 --
---   2. Statically linking liblua into core.so resolves those symbols and does
---      load -- but it puts a second Lua runtime in the process. Strings created
---      by REAPER's Lua are then misread by the embedded copy: short strings
---      survive (a 30-byte send returns 30) while long strings read as
---      zero-length (a 300-byte send returns 0, silently dropping the data).
---      Every real HTTP response exceeds Lua's 40-byte short-string limit, so
---      responses vanish with no error. Worse than not loading at all.
+--   2. Statically linking liblua into core.so resolves those symbols, but puts
+--      a second Lua runtime in the process. Strings created by REAPER's Lua are
+--      then misread by the embedded copy: short strings survive (a 30-byte send
+--      returns 30) while long strings read as zero-length (a 300-byte send
+--      returns 0, silently dropping the data). Every real HTTP response exceeds
+--      Lua's 40-byte short-string limit, so responses vanish with no error.
 --
--- A working build would have to share REAPER's own Lua runtime. No such
--- distribution is known: the "sockmonkey" package previously named here does
--- not exist. sockmonkey72 (github.com/jeremybernstein/ReaScripts) is a script
--- author whose repository ships no LuaSocket -- its extensions are
--- automidireset, childwindow and onprojectload.
+-- The fix is a LuaSocket build that shares REAPER's own Lua runtime: see
+-- luasocket-shim/ in this repo. REAPER's Lua symbols are present in the binary
+-- with real addresses, just not exported, so the shim resolves them from the
+-- host's Mach-O symbol table at module load and routes LuaSocket's C API calls
+-- through them. One runtime, so the long-string corruption cannot occur.
 --
--- Until such a build exists, this HTTP transport cannot run inside REAPER.
--- Use the file bridge (reaper_mcp_bridge.lua), which needs no native module.
+-- Build and install it with luasocket-shim/build.sh, which places the modules
+-- in <REAPER resource path>/Scripts/luasocket. Without that directory this
+-- script falls back to REAPER's default search paths, finds nothing, and tells
+-- you to use the file bridge.
+local luasocket_dir = reaper.GetResourcePath() .. "/Scripts/luasocket"
+package.path = luasocket_dir .. "/?.lua;" .. package.path
+package.cpath = luasocket_dir .. "/?.so;" .. package.cpath
+
 local status, socket_lib = pcall(require, "socket")
+
+-- A shim that cannot resolve REAPER's symbols returns no module rather than
+-- crashing the host, and a stale or half-copied install can load yet be
+-- missing pieces. Either way the failure surfaces much later, as an opaque
+-- "attempt to index" error, so check for the API actually used here.
+if status and (type(socket_lib) ~= "table" or type(socket_lib.tcp) ~= "function") then
+  status = false
+  socket_lib = "loaded, but socket.tcp is missing (got " .. type(socket_lib) ..
+               ") -- stale or partial install, or the shim could not resolve " ..
+               "REAPER's Lua symbols"
+end
+
 if not status then
   reaper.ShowConsoleMsg("ERROR: LuaSocket not available to REAPER.\n")
   reaper.ShowConsoleMsg("Reason: " .. tostring(socket_lib) .. "\n")
-  reaper.ShowConsoleMsg("\nUse the file-based bridge instead (reaper_mcp_bridge.lua).\n")
+  reaper.ShowConsoleMsg("\nExpected the shimmed build in:\n")
+  reaper.ShowConsoleMsg("  " .. luasocket_dir .. "\n")
+  reaper.ShowConsoleMsg("Build it with luasocket-shim/build.sh from the reaper-mcp repo.\n")
+  reaper.ShowConsoleMsg("\nOr use the file-based bridge instead (reaper_mcp_bridge.lua).\n")
   reaper.ShowConsoleMsg("It needs no native module and is the default transport\n")
   reaper.ShowConsoleMsg("used by the MCP server (REAPER_COMM_MODE=file).\n")
-  reaper.ShowConsoleMsg("\nWhy not just install LuaSocket: there is currently no build\n")
-  reaper.ShowConsoleMsg("that works inside REAPER. Stock builds cannot load at all\n")
-  reaper.ShowConsoleMsg("(REAPER does not export Lua's C symbols), and statically\n")
-  reaper.ShowConsoleMsg("linked builds load but silently drop any response longer\n")
-  reaper.ShowConsoleMsg("than 40 bytes. See the comment above this message.\n")
+  reaper.ShowConsoleMsg("\nNote: a stock LuaSocket will not work here. It either fails\n")
+  reaper.ShowConsoleMsg("to open (REAPER does not export Lua's C symbols) or, if built\n")
+  reaper.ShowConsoleMsg("with liblua linked in, opens but silently drops any response\n")
+  reaper.ShowConsoleMsg("longer than 40 bytes. See the comment above this message.\n")
   return
 end
 
@@ -113,7 +132,9 @@ end
 
 local function linear_to_db(linear)
   if linear <= 0 then return -150 end
-  return 20 * math.log10(linear)
+  -- math.log10 was removed in Lua 5.2; REAPER embeds 5.4, where math.log with
+  -- an explicit base 10 uses log10 internally, so precision is unchanged.
+  return 20 * math.log(linear, 10)
 end
 
 local function round(num, decimals)
@@ -286,8 +307,18 @@ local function json_decode(str, depth)
 end
 
 local function parse_request(request_text)
+  -- Split headers from body at the blank line, before tokenizing anything.
+  -- Iterating "[^\r\n]+" over the whole request skips empty lines, so the
+  -- blank line that ends the headers disappears and the body is never found:
+  -- every POST arrives with an empty body and its JSON is silently ignored.
+  local header_text, body = request_text:match("^(.-)\r?\n\r?\n(.*)$")
+  if not header_text then
+    header_text = request_text
+    body = ""
+  end
+
   local lines = {}
-  for line in request_text:gmatch("[^\r\n]+") do
+  for line in header_text:gmatch("[^\r\n]+") do
     table.insert(lines, line)
   end
 
@@ -299,23 +330,10 @@ local function parse_request(request_text)
 
   -- Parse headers
   local headers = {}
-  local body_start = nil
   for i = 2, #lines do
-    if lines[i] == "" then
-      body_start = i + 1
-      break
-    end
     local key, value = lines[i]:match("^([^:]+):%s*(.+)$")
     if key then
       headers[key:lower()] = value
-    end
-  end
-
-  -- Get body
-  local body = ""
-  if body_start then
-    for i = body_start, #lines do
-      body = body .. lines[i]
     end
   end
 
@@ -327,7 +345,12 @@ local function parse_request(request_text)
   }
 end
 
+-- Set by send_response, cleared before each request, so the error path can tell
+-- whether a reply already went out.
+local response_sent = false
+
 local function send_response(client_socket, status_code, status_text, body)
+  response_sent = true
   local response = string.format(
     "HTTP/1.1 %d %s\r\n" ..
     "Content-Type: application/json\r\n" ..
@@ -349,7 +372,8 @@ local function send_json(client_socket, data, status_code)
                       status_code == 400 and "Bad Request" or
                       status_code == 401 and "Unauthorized" or
                       status_code == 404 and "Not Found" or
-                      status_code == 413 and "Payload Too Large" or "Error"
+                      status_code == 413 and "Payload Too Large" or
+                      status_code == 500 and "Internal Server Error" or "Error"
   send_response(client_socket, status_code, status_text, json_encode(data))
 end
 
@@ -389,9 +413,13 @@ local function get_track_info(track)
   local solo = reaper.GetMediaTrackInfo_Value(track, "I_SOLO")
   local track_num = reaper.GetMediaTrackInfo_Value(track, "IP_TRACKNUMBER")
 
+  -- IP_TRACKNUMBER is 1-based for regular tracks, -1 for the master track and
+  -- 0 when the track is not found. Only the 0 case was special-cased, so the
+  -- master fell through the 1-based conversion and reported index -2 -- while
+  -- every other part of this API, including the 404 hint, calls master -1.
   local track_index
-  if track_num == 0 then
-    track_index = -1  -- Master track
+  if track_num <= 0 then
+    track_index = -1
   else
     track_index = math.floor(track_num) - 1  -- Convert to 0-based
   end
@@ -612,10 +640,14 @@ local function handle_get(path, client_socket)
 
   -- Project
   if path == "/project" then
+    -- Arity matters here: GetProjectName returns just the name, and
+    -- GetProjectTimeSignature2 returns exactly (bpm, bpi). Consuming a leading
+    -- retval that does not exist left project_name nil and bpi nil, and the
+    -- math.floor(bpi) below then threw on every request to this endpoint.
     local project_path = reaper.GetProjectPath("")
-    local _, project_name = reaper.GetProjectName(0, "")
+    local project_name = reaper.GetProjectName(0, "")
     local tempo = reaper.Master_GetTempo()
-    local _, bpm, bpi = reaper.GetProjectTimeSignature2(0)
+    local _, bpi = reaper.GetProjectTimeSignature2(0)
 
     send_json(client_socket, {
       path = project_path,
@@ -1442,7 +1474,19 @@ local function process_requests()
     end
 
     if not too_large and #request_text > 0 then
-      handle_request(request_text, client)
+      -- A handler error must not take the bridge down. REAPER swallows errors
+      -- thrown inside deferred callbacks, so an unguarded failure here stops
+      -- the accept loop for the rest of the session -- the port stays open,
+      -- every later request hangs, and nothing is reported.
+      response_sent = false
+      local handled, handler_err = pcall(handle_request, request_text, client)
+      if not handled then
+        reaper.ShowConsoleMsg("Request handler error: " .. tostring(handler_err) .. "\n")
+        if not response_sent then
+          -- Generic body: the Lua error text carries absolute script paths.
+          pcall(send_error, client, "Internal server error", 500)
+        end
+      end
     end
 
     client:close()
