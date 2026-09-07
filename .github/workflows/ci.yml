@@ -22,12 +22,12 @@ jobs:
         # can widen the default rule set. This repo ships no [tool.ruff] config,
         # so it relies on those defaults -- an unpinned ruff turns an unrelated
         # upstream release into a red build on unchanged code.
-        run: uvx ruff@0.15.12 check reaper_mcp_server.py test_server_contracts.py test_connection.py
+        run: uvx ruff@0.15.12 check reaper_mcp_server.py test_server_contracts.py test_bridge_files.py test_connection.py
 
       - name: Offline contract tests
         run: >
           uv run --with mcp --with httpx --with pytest --with pytest-asyncio
-          python -m pytest test_server_contracts.py -q
+          python -m pytest test_server_contracts.py test_bridge_files.py -q
 
       - name: pip-audit (resolved dependency tree)
         run: uv run --with mcp --with httpx --with pip-audit pip-audit
