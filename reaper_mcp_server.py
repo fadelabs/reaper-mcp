@@ -279,6 +279,7 @@ async def reaper_call_file(func: str, args: list) -> dict:
             try:
                 path.unlink(missing_ok=True)
             except OSError:
+                # Preserve the transport result or cancellation if cleanup fails.
                 pass
 
 

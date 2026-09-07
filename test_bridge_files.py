@@ -33,7 +33,7 @@ async def test_cancellation_removes_pending_request(bridge):
     await asyncio.sleep(0.03)
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
-        await task
+        await asyncio.wait_for(task, timeout=1)
     assert not list(bridge.glob("request_*.json"))
 
 
