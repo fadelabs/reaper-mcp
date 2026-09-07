@@ -9,20 +9,23 @@ A TwelveTake Studios project - https://twelvetake.com
 
 Author: TwelveTake Studios LLC
 License: MIT
-Version: 1.1.0
+Version: 1.1.1
 """
 
-__version__ = "1.1.0"
+__version__ = "1.1.1"
 __package_name__ = "twelvetake-reaper-mcp"
 
-import os
-import sys
 import asyncio
 import json
 import math
+import os
+import stat
+import sys
+import tempfile
 import time
 import uuid
 from pathlib import Path
+
 from mcp.server.fastmcp import FastMCP
 
 try:
@@ -172,22 +175,25 @@ async def reaper_call_http(func: str, args: list) -> dict:
             timeout=5.0
         )
         if response.status_code == 200:
-            return response.json()
+            result = response.json()
+            if not isinstance(result, dict):
+                raise ValueError("HTTP bridge response must be a JSON object")
+            return result
         elif response.status_code == 401:
             return {
                 "ok": False,
                 "error": "HTTP bridge rejected the token. Set REAPER_BRIDGE_TOKEN "
                          "to the value printed in the REAPER console.",
-                "fallback": True,
+                "fallback": False,
             }
         else:
-            return {"ok": False, "error": f"HTTP {response.status_code}", "fallback": True}
-    except httpx.ConnectError:
+            return {"ok": False, "error": f"HTTP {response.status_code}", "fallback": False}
+    except (httpx.ConnectError, httpx.ConnectTimeout):
         return {"ok": False, "error": "Cannot connect to REAPER HTTP bridge", "fallback": True}
     except httpx.TimeoutException:
-        return {"ok": False, "error": "HTTP request timed out", "fallback": True}
+        return {"ok": False, "error": "HTTP request timed out; execution status is unknown. Check REAPER before retrying.", "fallback": False}
     except Exception as e:
-        return {"ok": False, "error": f"HTTP error: {str(e)}", "fallback": True}
+        return {"ok": False, "error": f"HTTP error: {e!s}", "fallback": False}
 
 
 async def reaper_call_file(func: str, args: list) -> dict:
@@ -216,22 +222,33 @@ async def reaper_call_file(func: str, args: list) -> dict:
             pass
 
         # Write request atomically (temp file + rename), 0600 before publish.
-        tmp_file = request_file.with_suffix('.tmp')
-        tmp_file.write_text(json.dumps(request_data))
+        fd, temp_name = tempfile.mkstemp(prefix=".request-", suffix=".tmp", dir=BRIDGE_DIR)
+        tmp_file = Path(temp_name)
         try:
-            tmp_file.chmod(0o600)
-        except OSError:
-            pass
-        tmp_file.rename(request_file)
+            with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                json.dump(request_data, stream, allow_nan=False)
+            os.replace(tmp_file, request_file)
+        finally:
+            tmp_file.unlink(missing_ok=True)
 
         # Wait for response
-        start_time = time.time()
-        while time.time() - start_time < FILE_TIMEOUT:
+        start_time = time.monotonic()
+        while time.monotonic() - start_time < FILE_TIMEOUT:
             if response_file.exists():
                 try:
-                    response_text = response_file.read_text()
+                    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+                    fd = os.open(response_file, flags)
+                    with os.fdopen(fd, "rb") as stream:
+                        info = os.fstat(stream.fileno())
+                        if not stat.S_ISREG(info.st_mode) or info.st_size > 4_000_000:
+                            raise ValueError("Invalid bridge response file")
+                        response_text = stream.read(4_000_001)
+                    if len(response_text) > 4_000_000:
+                        raise ValueError("Bridge response exceeds size limit")
                     if response_text.strip():
                         response_data = json.loads(response_text)
+                        if not isinstance(response_data, dict):
+                            raise ValueError("Bridge response must be a JSON object")
                         # Clean up
                         try:
                             request_file.unlink(missing_ok=True)
@@ -255,7 +272,15 @@ async def reaper_call_file(func: str, args: list) -> dict:
             "hint": "Make sure the REAPER bridge script is running"
         }
     except Exception as e:
-        return {"ok": False, "error": f"File request failed: {str(e)}"}
+        return {"ok": False, "error": f"File request failed: {e!s}"}
+    finally:
+        # Cancellation and parse failures must not leave requests to execute later.
+        for path in (request_file, response_file):
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                # Preserve the transport result or cancellation if cleanup fails.
+                pass
 
 
 async def reaper_call(func: str, *args) -> dict:
